@@ -177,24 +177,30 @@ pub struct HelmRenderResult {
 
 // ─── kubectl / helm helpers ───────────────────────────────────────────────────
 
-fn run_kubectl(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("kubectl")
-        .args(args)
-        .output()
-        .map_err(|e| format!("kubectl not found: {}", e))?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
-    }
+// ─── Active kubeconfig context ────────────────────────────────────────────────
+//
+// Stored as a global so run_kubectl / run_kubectl_output can read it without
+// changing every call site. Set via set_active_cluster_target Tauri command.
+
+use std::sync::OnceLock;
+
+static ACTIVE_KUBECONFIG: OnceLock<Mutex<KubeconfigRef>> = OnceLock::new();
+
+fn get_kubeconfig_state() -> &'static Mutex<KubeconfigRef> {
+    ACTIVE_KUBECONFIG.get_or_init(|| Mutex::new(KubeconfigRef::default()))
 }
 
-fn run_helm(args: &[&str], cwd: &Path) -> Result<String, String> {
-    let output = Command::new("helm")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| format!("helm not found: {}", e))?;
+fn run_kubectl(args: &[&str]) -> Result<String, String> {
+    let mut cmd = Command::new("kubectl");
+    {
+        let kref = get_kubeconfig_state().lock().unwrap();
+        if let (Some(ref path), Some(ref ctx)) = (&kref.kubeconfig_path, &kref.context_name) {
+            cmd.arg("--kubeconfig").arg(path);
+            cmd.arg("--context").arg(ctx);
+        }
+    }
+    cmd.args(args);
+    let output = cmd.output().map_err(|e| format!("kubectl not found: {}", e))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
@@ -203,7 +209,16 @@ fn run_helm(args: &[&str], cwd: &Path) -> Result<String, String> {
 }
 
 fn run_kubectl_output(args: &[&str]) -> (String, String, bool) {
-    match Command::new("kubectl").args(args).output() {
+    let mut cmd = Command::new("kubectl");
+    {
+        let kref = get_kubeconfig_state().lock().unwrap();
+        if let (Some(ref path), Some(ref ctx)) = (&kref.kubeconfig_path, &kref.context_name) {
+            cmd.arg("--kubeconfig").arg(path);
+            cmd.arg("--context").arg(ctx);
+        }
+    }
+    cmd.args(args);
+    match cmd.output() {
         Ok(out) => (
             String::from_utf8_lossy(&out.stdout).to_string(),
             String::from_utf8_lossy(&out.stderr).to_string(),
@@ -213,8 +228,46 @@ fn run_kubectl_output(args: &[&str]) -> (String, String, bool) {
     }
 }
 
+/// Like run_kubectl but passes --request-timeout to kubectl.
+/// Used inside spawn_blocking for status polling — doesn't block UI.
+fn run_kubectl_with_timeout(args: &[&str], timeout_secs: u64) -> Result<String, String> {
+    let timeout_arg = format!("--request-timeout={}s", timeout_secs);
+    let mut full_args: Vec<&str> = args.to_vec();
+    // Only add if not already present
+    if !full_args.iter().any(|a| a.starts_with("--request-timeout")) {
+        full_args.push(&timeout_arg);
+    }
+    run_kubectl(&full_args)
+}
+
+fn run_helm(args: &[&str], cwd: &Path) -> Result<String, String> {
+    let mut cmd = Command::new("helm");
+    {
+        let kref = get_kubeconfig_state().lock().unwrap();
+        if let (Some(ref path), Some(ref ctx)) = (&kref.kubeconfig_path, &kref.context_name) {
+            cmd.arg("--kubeconfig").arg(path);
+            cmd.arg("--kube-context").arg(ctx);
+        }
+    }
+    let output = cmd.args(args).current_dir(cwd).output()
+        .map_err(|e| format!("helm not found: {}", e))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
+    }
+}
+
 fn run_helm_output(args: &[&str], cwd: &Path) -> (String, String, bool) {
-    match Command::new("helm").args(args).current_dir(cwd).output() {
+    let mut cmd = Command::new("helm");
+    {
+        let kref = get_kubeconfig_state().lock().unwrap();
+        if let (Some(ref path), Some(ref ctx)) = (&kref.kubeconfig_path, &kref.context_name) {
+            cmd.arg("--kubeconfig").arg(path);
+            cmd.arg("--kube-context").arg(ctx);
+        }
+    }
+    match cmd.args(args).current_dir(cwd).output() {
         Ok(out) => (
             String::from_utf8_lossy(&out.stdout).to_string(),
             String::from_utf8_lossy(&out.stderr).to_string(),
@@ -1967,92 +2020,107 @@ fn kubectl_delete_by_label(label: String, namespace: String) -> Result<String, S
 }
 
 #[tauri::command]
-fn get_cluster_status() -> ClusterStatus {
-    if run_kubectl(&["version", "--client"]).is_err() {
-        return ClusterStatus {
-            fields: vec![],
-            kubectl_available: false,
-            error: Some("kubectl not found".to_string()),
-        };
-    }
-
-    let pods_raw = match run_kubectl(&["get", "pods", "--all-namespaces", "--no-headers"]) {
-        Ok(o) => o,
-        Err(e) => {
+async fn get_cluster_status() -> ClusterStatus {
+    tauri::async_runtime::spawn_blocking(|| {
+        // Quick client-only check — no network
+        if run_kubectl_with_timeout(&["version", "--client"], 3).is_err() {
             return ClusterStatus {
                 fields: vec![],
-                kubectl_available: true,
-                error: Some(e),
-            }
+                kubectl_available: false,
+                error: Some("kubectl not found".to_string()),
+            };
         }
-    };
 
-    let pods: Vec<PodInfo> = pods_raw
-        .lines()
-        .filter_map(|line| {
-            let p: Vec<&str> = line.split_whitespace().collect();
-            if p.len() < 5 {
-                return None;
+        let pods_raw = match run_kubectl_with_timeout(
+            &["get", "pods", "--all-namespaces", "--no-headers", "--request-timeout=5s"],
+            8,
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                return ClusterStatus {
+                    fields: vec![],
+                    kubectl_available: true,
+                    error: Some(e),
+                }
             }
-            let (ready, total) = parse_ready(p[2]);
-            Some(PodInfo {
-                namespace: p[0].to_string(),
-                name: p[1].to_string(),
-                phase: p[3].to_string(),
-                ready,
-                total,
-                restarts: p[4].parse().unwrap_or(0),
+        };
+
+        let pods: Vec<PodInfo> = pods_raw
+            .lines()
+            .filter_map(|line| {
+                let p: Vec<&str> = line.split_whitespace().collect();
+                if p.len() < 5 {
+                    return None;
+                }
+                let (ready, total) = parse_ready(p[2]);
+                Some(PodInfo {
+                    namespace: p[0].to_string(),
+                    name: p[1].to_string(),
+                    phase: p[3].to_string(),
+                    ready,
+                    total,
+                    restarts: p[4].parse().unwrap_or(0),
+                })
             })
-        })
-        .collect();
+            .collect();
 
-    let mut fields: Vec<FieldStatus> = Vec::new();
+        let mut fields: Vec<FieldStatus> = Vec::new();
 
-    for resource in &["deployments", "statefulsets"] {
-        let raw = run_kubectl(&["get", resource, "--all-namespaces", "--no-headers"])
+        for resource in &["deployments", "statefulsets"] {
+            let raw = run_kubectl_with_timeout(
+                &["get", resource, "--all-namespaces", "--no-headers", "--request-timeout=5s"],
+                8,
+            )
             .unwrap_or_default();
-        for line in raw.lines() {
-            let p: Vec<&str> = line.split_whitespace().collect();
-            if p.len() < 4 {
-                continue;
+            for line in raw.lines() {
+                let p: Vec<&str> = line.split_whitespace().collect();
+                if p.len() < 4 {
+                    continue;
+                }
+                let ns = p[0].to_string();
+                let name = p[1].to_string();
+
+                let (desired, ready, available) =
+                    if *resource == "deployments" && p.len() >= 5 {
+                        let (r, d) = parse_ready(p[2]);
+                        let avail: u32 = p[4].parse().unwrap_or(r);
+                        (d, r, avail)
+                    } else {
+                        let (r, d) = parse_ready(p[2]);
+                        (d, r, r)
+                    };
+
+                let my_pods: Vec<PodInfo> = pods
+                    .iter()
+                    .filter(|pod| pod.namespace == ns && pod.name.starts_with(&name))
+                    .cloned()
+                    .collect();
+
+                let status = compute_status(ready, desired).to_string();
+                fields.push(FieldStatus {
+                    label: name,
+                    namespace: ns,
+                    desired,
+                    ready,
+                    available,
+                    status,
+                    pods: my_pods,
+                });
             }
-            let ns = p[0].to_string();
-            let name = p[1].to_string();
-
-            let (desired, ready, available) =
-                if *resource == "deployments" && p.len() >= 5 {
-                    let (r, d) = parse_ready(p[2]);
-                    let avail: u32 = p[4].parse().unwrap_or(r);
-                    (d, r, avail)
-                } else {
-                    let (r, d) = parse_ready(p[2]);
-                    (d, r, r)
-                };
-
-            let my_pods: Vec<PodInfo> = pods
-                .iter()
-                .filter(|pod| pod.namespace == ns && pod.name.starts_with(&name))
-                .cloned()
-                .collect();
-
-            let status = compute_status(ready, desired).to_string();
-            fields.push(FieldStatus {
-                label: name,
-                namespace: ns,
-                desired,
-                ready,
-                available,
-                status,
-                pods: my_pods,
-            });
         }
-    }
 
-    ClusterStatus {
-        fields,
-        kubectl_available: true,
-        error: None,
-    }
+        ClusterStatus {
+            fields,
+            kubectl_available: true,
+            error: None,
+        }
+    })
+    .await
+    .unwrap_or(ClusterStatus {
+        fields: vec![],
+        kubectl_available: false,
+        error: Some("Status check timed out".to_string()),
+    })
 }
 
 #[tauri::command]
@@ -2746,7 +2814,15 @@ fn deploy_image_inner(req: DeployImageRequest) -> DeployImageResult {
 /// Apply a YAML string via kubectl apply --server-side (stdin).
 fn kubectl_apply_manifest(yaml: &str, _namespace: &str) -> Result<String, String> {
     use std::io::Write;
-    let mut child = Command::new("kubectl")
+    let mut cmd = Command::new("kubectl");
+    {
+        let kref = get_kubeconfig_state().lock().unwrap();
+        if let (Some(ref path), Some(ref ctx)) = (&kref.kubeconfig_path, &kref.context_name) {
+            cmd.arg("--kubeconfig").arg(path);
+            cmd.arg("--context").arg(ctx);
+        }
+    }
+    let mut child = cmd
         .args(["apply", "--server-side", "--field-manager=endfield", "--force-conflicts", "-f", "-"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3055,6 +3131,16 @@ pub struct FileChangedPayload {
 /// Stored in Tauri managed state so Tauri drops it when the app exits.
 pub struct WatcherState(pub Mutex<Option<RecommendedWatcher>>);
 
+/// Active kubeconfig/context for the current project session.
+/// Set when the user opens a project with a cluster target.
+/// All run_kubectl / run_kubectl_output calls read from this automatically.
+#[derive(Debug, Clone, Default)]
+pub struct KubeconfigRef {
+    pub kubeconfig_path: Option<String>,
+    pub context_name: Option<String>,
+}
+
+
 /// Start watching `project_path` recursively.
 /// Fires `yaml-file-changed` events on the Tauri window whenever a .yaml/.yml
 /// file is created, modified, or removed.
@@ -3144,6 +3230,716 @@ fn unwatch_project(state: tauri::State<WatcherState>) {
     *guard = None; // Drop the watcher — this unregisters OS-level watches
 }
 
+// ─── Cluster Target / Kubeconfig ─────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct KubeconfigContext {
+    pub name: String,
+    pub cluster: String,
+    pub namespace: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ClusterTarget {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub target_type: String, // "kubernetes"
+    pub kubeconfig_path: Option<String>,
+    pub context_name: String,
+    pub namespace: Option<String>,
+    pub is_default: bool,
+    pub last_connection_status: Option<String>,
+    pub last_used_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProjectConfig {
+    pub version: u32,
+    pub project_path: String,
+    pub cluster_target: Option<ClusterTarget>,
+    pub fields: Vec<FieldLayoutEntry>,
+}
+
+/// Expand leading `~` to the real home directory.
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") || path == "~" {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        path.replacen("~", &home, 1)
+    } else {
+        path.to_string()
+    }
+}
+
+/// Resolve a kubeconfig path: expand tilde, fall back to $KUBECONFIG or ~/.kube/config.
+fn resolve_kubeconfig(path: Option<&str>) -> String {
+    match path {
+        Some(p) if !p.trim().is_empty() => expand_tilde(p.trim()),
+        _ => {
+            std::env::var("KUBECONFIG").unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                format!("{}/.kube/config", home)
+            })
+        }
+    }
+}
+
+#[tauri::command]
+fn list_kubeconfig_contexts(kubeconfig_path: Option<String>) -> Result<Vec<KubeconfigContext>, String> {
+    let kubeconfig = resolve_kubeconfig(kubeconfig_path.as_deref());
+
+    let content = fs::read_to_string(&kubeconfig)
+        .map_err(|e| format!("Cannot read kubeconfig at {}: {}", kubeconfig, e))?;
+
+    // Real kubeconfig contexts look like:
+    //
+    // contexts:
+    // - context:
+    //     cluster: default
+    //     namespace: foo      <- optional
+    //     user: default
+    //   name: default         <- name is a sibling of "context:", not inside it
+    //
+    // Strategy: collect all lines in the contexts: block, then scan each
+    // list item (starts with "- ") for its name and the cluster inside context.
+
+    let mut contexts: Vec<KubeconfigContext> = Vec::new();
+    let mut in_contexts_block = false;
+    let mut item_lines: Vec<String> = Vec::new();
+
+    let flush = |item_lines: &Vec<String>, contexts: &mut Vec<KubeconfigContext>| {
+        let mut name: Option<String> = None;
+        let mut cluster: Option<String> = None;
+        let mut namespace: Option<String> = None;
+        for l in item_lines {
+            let t = l.trim();
+            if let Some(v) = t.strip_prefix("name:") { name = Some(v.trim().to_string()); }
+            else if let Some(v) = t.strip_prefix("cluster:") { cluster = Some(v.trim().to_string()); }
+            else if let Some(v) = t.strip_prefix("namespace:") { namespace = Some(v.trim().to_string()); }
+        }
+        if let (Some(n), Some(c)) = (name, cluster) {
+            contexts.push(KubeconfigContext { name: n, cluster: c, namespace });
+        }
+    };
+
+    for line in content.lines() {
+        // Top-level key — check if we enter/leave contexts block
+        if !line.starts_with(' ') && !line.starts_with('\t') && !line.starts_with('-') {
+            if line.trim() == "contexts:" {
+                in_contexts_block = true;
+                item_lines.clear();
+                continue;
+            } else if in_contexts_block {
+                // Left the contexts block — flush last item
+                flush(&item_lines, &mut contexts);
+                item_lines.clear();
+                in_contexts_block = false;
+            }
+        }
+
+        if !in_contexts_block { continue; }
+
+        // New list item
+        if line.starts_with("- ") {
+            if !item_lines.is_empty() {
+                flush(&item_lines, &mut contexts);
+                item_lines.clear();
+            }
+            // Push the rest of this line (after "- ") as a normal line
+            let rest = &line[2..];
+            item_lines.push(format!("  {}", rest));
+        } else {
+            item_lines.push(line.to_string());
+        }
+    }
+    // Flush last item
+    if in_contexts_block && !item_lines.is_empty() {
+        flush(&item_lines, &mut contexts);
+    }
+
+    if contexts.is_empty() {
+        return Err(format!("No contexts found in kubeconfig at {}", kubeconfig));
+    }
+
+    Ok(contexts)
+}
+
+/// Return the currently active context from the default kubeconfig.
+#[tauri::command]
+fn get_current_kubeconfig_context(kubeconfig_path: Option<String>) -> Result<String, String> {
+    let kubeconfig = resolve_kubeconfig(kubeconfig_path.as_deref());
+
+    let content = fs::read_to_string(&kubeconfig)
+        .map_err(|e| format!("Cannot read kubeconfig at {}: {}", kubeconfig, e))?;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("current-context:") {
+            return Ok(trimmed.trim_start_matches("current-context:").trim().to_string());
+        }
+    }
+
+    Err("No current-context found in kubeconfig".to_string())
+}
+
+/// Test connectivity to a cluster context by running `kubectl cluster-info`.
+/// Returns Ok(info_string) or Err(reason).
+#[tauri::command]
+fn test_cluster_connection(kubeconfig_path: Option<String>, context_name: String) -> Result<String, String> {
+    let kubeconfig = resolve_kubeconfig(kubeconfig_path.as_deref());
+
+    let output = Command::new("kubectl")
+        .arg("--kubeconfig")
+        .arg(&kubeconfig)
+        .arg("--context")
+        .arg(&context_name)
+        .arg("cluster-info")
+        .output()
+        .map_err(|e| format!("kubectl not found: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if output.status.success() {
+        // cluster-info returns colored output — strip ANSI codes and grab first useful line
+        let clean: String = stdout
+            .lines()
+            .map(|l| {
+                // Strip ANSI escape sequences
+                let mut result = String::new();
+                let mut chars = l.chars().peekable();
+                while let Some(c) = chars.next() {
+                    if c == '\x1b' {
+                        // Skip until 'm'
+                        for ch in chars.by_ref() {
+                            if ch == 'm' { break; }
+                        }
+                    } else {
+                        result.push(c);
+                    }
+                }
+                result
+            })
+            .find(|l| l.contains("is running at"))
+            .unwrap_or_else(|| "Connected".to_string());
+        Ok(clean.trim().to_string())
+    } else {
+        let msg = if !stderr.trim().is_empty() { stderr } else { stdout };
+        Err(msg.trim().to_string())
+    }
+}
+
+/// Save project config (cluster target + layout) to .endfield/project.json
+#[tauri::command]
+fn save_project_config(project_path: String, cluster_target: Option<ClusterTarget>, fields: Vec<FieldLayoutEntry>) -> Result<(), String> {
+    let config = ProjectConfig {
+        version: 1,
+        project_path: project_path.clone(),
+        cluster_target,
+        fields,
+    };
+    let dir = Path::new(&project_path).join(".endfield");
+    fs::create_dir_all(&dir).map_err(|e| format!("Cannot create .endfield dir: {}", e))?;
+    let json = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Serialize error: {}", e))?;
+    fs::write(dir.join("project.json"), json)
+        .map_err(|e| format!("Cannot write project.json: {}", e))
+}
+
+/// Load project config from .endfield/project.json
+#[tauri::command]
+fn load_project_config(project_path: String) -> Result<ProjectConfig, String> {
+    let path = Path::new(&project_path).join(".endfield").join("project.json");
+    if !path.exists() {
+        return Err("No project.json found".to_string());
+    }
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("Cannot read project.json: {}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("Parse error: {}", e))
+}
+
+/// Called by the frontend when a project is opened with a cluster target,
+/// or when the user switches cluster. Stores kubeconfig+context in the global
+/// so all subsequent kubectl calls use the right cluster.
+#[tauri::command]
+fn set_active_cluster_target(
+    kubeconfig_path: Option<String>,
+    context_name: Option<String>,
+) {
+    let mut kref = get_kubeconfig_state().lock().unwrap();
+    kref.kubeconfig_path = kubeconfig_path.map(|p| expand_tilde(&p));
+    kref.context_name = context_name;
+}
+
+/// Return the default kubeconfig path
+#[tauri::command]
+fn get_default_kubeconfig_path() -> String {
+    resolve_kubeconfig(None)
+}
+
+// ─── Ingress Route File Scanning ──────────────────────────────────────────────
+
+/// One backend reference inside an Ingress rule path.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IngressBackendRef {
+    /// Service name from `backend.service.name`
+    pub service_name: String,
+    /// Port number (if specified)
+    pub port_number: Option<u32>,
+    /// Port name (if specified)
+    pub port_name: Option<String>,
+}
+
+/// A single HTTP path entry found in an Ingress spec.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IngressPathEntry {
+    pub host: Option<String>,
+    pub path: String,
+    pub path_type: String,
+    pub backend: IngressBackendRef,
+}
+
+/// Full information about one Ingress resource found in a file.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FileIngressInfo {
+    /// Ingress metadata.name
+    pub ingress_name: String,
+    /// Ingress metadata.namespace
+    pub ingress_namespace: String,
+    /// spec.ingressClassName
+    pub ingress_class_name: Option<String>,
+    /// All path entries collected from spec.rules[*].http.paths[*]
+    pub paths: Vec<IngressPathEntry>,
+    /// Absolute path of the file this Ingress was read from
+    pub file_path: String,
+}
+
+/// Resolved link: one Ingress path → one backend service, with file existence info.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct IngressRouteLink {
+    // ── Ingress side ──
+    pub ingress_name: String,
+    pub ingress_namespace: String,
+    pub ingress_file_path: String,
+    pub ingress_class_name: Option<String>,
+
+    // ── Route ──
+    pub host: Option<String>,
+    pub path: String,
+    pub path_type: String,
+
+    // ── Backend (target service) ──
+    pub target_service: String,
+    pub target_namespace: String,
+    pub target_port_number: Option<u32>,
+    pub target_port_name: Option<String>,
+
+    // ── File resolution ──
+    /// true when a Service YAML for `target_service` was found on disk
+    pub service_file_exists: bool,
+    /// Path to the Service file (if found)
+    pub service_file_path: Option<String>,
+    /// true when a Deployment/StatefulSet YAML for `target_service` was found
+    pub workload_file_exists: bool,
+    /// Path to the workload file (if found)
+    pub workload_file_path: Option<String>,
+}
+
+/// Result of scanning a project directory for Ingress → Service links.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IngressScanResult {
+    pub links: Vec<IngressRouteLink>,
+    pub ingress_files_scanned: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+// ── Ingress YAML parser (no external crates needed) ───────────────────────────
+
+/// Parse a single YAML document string as an Ingress, returning an `FileIngressInfo`
+/// or `None` if it is not an Ingress.
+fn parse_ingress_doc(doc: &str, file_path: &Path) -> Option<FileIngressInfo> {
+    // Must be kind: Ingress
+    let kind = extract_yaml_field(doc, "kind")?;
+    if kind != "Ingress" {
+        return None;
+    }
+
+    let ingress_name = extract_metadata_field(doc, "name")
+        .unwrap_or("unknown")
+        .to_string();
+    let ingress_namespace = extract_metadata_field(doc, "namespace")
+        .unwrap_or("default")
+        .to_string();
+
+    // ingressClassName — appears under spec: as `ingressClassName:`
+    let ingress_class_name = {
+        let mut in_spec = false;
+        let mut found: Option<String> = None;
+        for line in doc.lines() {
+            if line.trim() == "spec:" && !line.starts_with(' ') {
+                in_spec = true;
+                continue;
+            }
+            if in_spec {
+                if !line.is_empty() && !line.starts_with(' ') && !line.starts_with('\t') {
+                    break; // left spec block
+                }
+                let t = line.trim();
+                if let Some(rest) = t.strip_prefix("ingressClassName:") {
+                    let v = rest.trim().trim_matches('"').trim_matches('\'');
+                    if !v.is_empty() {
+                        found = Some(v.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+        found
+    };
+
+    // Parse rules → http → paths
+    // We do a line-by-line state machine because the doc is already split and
+    // we want to avoid pulling in serde_yaml here.
+    let paths = parse_ingress_paths(doc);
+
+    if paths.is_empty() {
+        return None; // Ingress with no HTTP rules — not interesting for routing
+    }
+
+    Some(FileIngressInfo {
+        ingress_name,
+        ingress_namespace,
+        ingress_class_name,
+        paths,
+        file_path: file_path.to_string_lossy().to_string(),
+    })
+}
+
+/// State-machine parser for `spec.rules[*].http.paths[*]` inside one YAML doc.
+fn parse_ingress_paths(doc: &str) -> Vec<IngressPathEntry> {
+    #[derive(PartialEq)]
+    enum State {
+        Top,
+        InSpec,
+        InRules,
+        InRule,
+        InHttp,
+        InPaths,
+        InPath,
+        InBackend,
+        InBackendService,
+        InBackendPort,
+    }
+
+    let mut state = State::Top;
+    let mut entries: Vec<IngressPathEntry> = Vec::new();
+
+    // Current rule / path accumulators
+    let mut cur_host: Option<String> = None;
+    let mut cur_path = String::new();
+    let mut cur_path_type = String::new();
+    let mut cur_svc = String::new();
+    let mut cur_port_num: Option<u32> = None;
+    let mut cur_port_name: Option<String> = None;
+
+    let flush_path = |entries: &mut Vec<IngressPathEntry>,
+                      host: &Option<String>,
+                      path: &str,
+                      path_type: &str,
+                      svc: &str,
+                      pn: Option<u32>,
+                      pname: Option<String>| {
+        if !svc.is_empty() {
+            entries.push(IngressPathEntry {
+                host: host.clone(),
+                path: if path.is_empty() { "/".to_string() } else { path.to_string() },
+                path_type: if path_type.is_empty() { "Prefix".to_string() } else { path_type.to_string() },
+                backend: IngressBackendRef {
+                    service_name: svc.to_string(),
+                    port_number: pn,
+                    port_name: pname,
+                },
+            });
+        }
+    };
+
+    for line in doc.lines() {
+        if line.trim().is_empty() || line.trim().starts_with('#') {
+            continue;
+        }
+        let indent = line.chars().take_while(|c| *c == ' ').count();
+        let t = line.trim();
+
+        match state {
+            State::Top => {
+                if t == "spec:" && indent == 0 { state = State::InSpec; }
+            }
+            State::InSpec => {
+                if indent == 0 && t != "spec:" { state = State::Top; continue; }
+                if indent == 2 && t == "rules:" { state = State::InRules; }
+            }
+            State::InRules => {
+                if indent < 2 { state = State::InSpec; continue; }
+                if indent == 4 && t.starts_with("- ") {
+                    // New rule
+                    cur_host = None;
+                    state = State::InRule;
+                    // Check if host is on same line: "- host: foo.example.com"
+                    if let Some(rest) = t.strip_prefix("- ") {
+                        let rest = rest.trim();
+                        if let Some(h) = rest.strip_prefix("host:") {
+                            cur_host = Some(h.trim().trim_matches('"').trim_matches('\'').to_string());
+                        }
+                    }
+                }
+            }
+            State::InRule => {
+                if indent <= 2 { state = State::InRules; continue; }
+                if indent == 6 {
+                    if let Some(h) = t.strip_prefix("host:") {
+                        cur_host = Some(h.trim().trim_matches('"').trim_matches('\'').to_string());
+                    }
+                    if t == "http:" { state = State::InHttp; }
+                }
+            }
+            State::InHttp => {
+                if indent <= 6 { state = State::InRule; continue; }
+                if indent == 8 && t == "paths:" { state = State::InPaths; }
+            }
+            State::InPaths => {
+                if indent <= 8 { state = State::InHttp; continue; }
+                if indent == 10 && t.starts_with("- ") {
+                    // Flush previous path
+                    flush_path(&mut entries, &cur_host, &cur_path, &cur_path_type,
+                               &cur_svc, cur_port_num, cur_port_name.take());
+                    cur_path.clear(); cur_path_type.clear();
+                    cur_svc.clear(); cur_port_num = None; cur_port_name = None;
+                    state = State::InPath;
+                    // Inline field after "- "
+                    let rest = t.strip_prefix("- ").unwrap_or("").trim();
+                    if let Some(v) = rest.strip_prefix("path:") {
+                        cur_path = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                    }
+                }
+            }
+            State::InPath => {
+                if indent <= 8 { 
+                    flush_path(&mut entries, &cur_host, &cur_path, &cur_path_type,
+                               &cur_svc, cur_port_num, cur_port_name.take());
+                    cur_path.clear(); cur_path_type.clear();
+                    cur_svc.clear(); cur_port_num = None; cur_port_name = None;
+                    state = State::InPaths; continue; 
+                }
+                if indent == 12 {
+                    if let Some(v) = t.strip_prefix("path:") {
+                        cur_path = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                    }
+                    if let Some(v) = t.strip_prefix("pathType:") {
+                        cur_path_type = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                    }
+                    if t == "backend:" { state = State::InBackend; }
+                }
+            }
+            State::InBackend => {
+                if indent <= 10 { state = State::InPath; continue; }
+                if indent == 14 && t == "service:" { state = State::InBackendService; }
+            }
+            State::InBackendService => {
+                if indent <= 12 { state = State::InBackend; continue; }
+                if indent == 16 {
+                    if let Some(v) = t.strip_prefix("name:") {
+                        cur_svc = v.trim().trim_matches('"').trim_matches('\'').to_string();
+                    }
+                    if t == "port:" { state = State::InBackendPort; }
+                }
+            }
+            State::InBackendPort => {
+                if indent <= 14 { state = State::InBackendService; continue; }
+                if indent == 18 {
+                    if let Some(v) = t.strip_prefix("number:") {
+                        cur_port_num = v.trim().parse().ok();
+                    }
+                    if let Some(v) = t.strip_prefix("name:") {
+                        cur_port_name = Some(v.trim().trim_matches('"').trim_matches('\'').to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Flush last accumulated path
+    flush_path(&mut entries, &cur_host, &cur_path, &cur_path_type,
+               &cur_svc, cur_port_num, cur_port_name);
+
+    entries
+}
+
+/// Walk a directory tree collecting all FileIngressInfo from YAML files.
+fn scan_dir_for_ingresses(
+    dir: &Path,
+    ingresses: &mut Vec<FileIngressInfo>,
+    errors: &mut Vec<String>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        errors.push(format!("Cannot read: {}", dir.display()));
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') || name == "node_modules" || name == "vendor" || name == "charts" {
+                continue;
+            }
+            // Still descend into rendered/ — live rendered Ingresses are interesting
+            scan_dir_for_ingresses(&path, ingresses, errors);
+        } else if path.is_file() {
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if ext != "yaml" && ext != "yml" {
+                continue;
+            }
+            let content = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => { errors.push(format!("{}: {}", path.display(), e)); continue; }
+            };
+            for doc in content.split("\n---") {
+                let doc = doc.trim();
+                if doc.is_empty() { continue; }
+                if let Some(info) = parse_ingress_doc(doc, &path) {
+                    ingresses.push(info);
+                }
+            }
+        }
+    }
+}
+
+/// Build an index: service_name → Vec<file_path> by scanning all YAML files.
+/// Collects both Service and workload (Deployment/StatefulSet/…) entries separately.
+fn build_service_index(
+    dir: &Path,
+) -> (
+    std::collections::HashMap<String, String>, // service name → file path
+    std::collections::HashMap<String, String>, // workload name → file path
+) {
+    let mut services: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut workloads: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    let mut collect = |path: &Path| {
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        for doc in content.split("\n---") {
+            let doc = doc.trim();
+            if doc.is_empty() { continue; }
+            let kind = match extract_yaml_field(doc, "kind") {
+                Some(k) => k.to_string(),
+                None => continue,
+            };
+            let name = match extract_metadata_field(doc, "name") {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let fp = path.to_string_lossy().to_string();
+            match kind.as_str() {
+                "Service" => { services.entry(name).or_insert(fp); }
+                "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet" | "Job" | "CronJob" | "Pod" => {
+                    workloads.entry(name).or_insert(fp);
+                }
+                _ => {}
+            }
+        }
+    };
+
+    fn walk(dir: &Path, cb: &mut impl FnMut(&Path)) {
+        let Ok(entries) = fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with('.') || name == "node_modules" || name == "vendor" || name == "charts" {
+                    continue;
+                }
+                walk(&path, cb);
+            } else if path.is_file() {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext == "yaml" || ext == "yml" {
+                    cb(&path);
+                }
+            }
+        }
+    }
+
+    walk(dir, &mut collect);
+    (services, workloads)
+}
+
+/// Scan project directory for Ingress resources and resolve backend service links.
+///
+/// For each Ingress path, checks whether:
+/// - A Service YAML exists for the target service name
+/// - A workload YAML (Deployment/StatefulSet/…) exists for the same name
+///
+/// Returns a flat list of `IngressRouteLink` — one per Ingress path entry.
+#[tauri::command]
+fn scan_ingress_routes(folder_path: String) -> IngressScanResult {
+    let root = Path::new(&folder_path);
+    let mut errors: Vec<String> = Vec::new();
+
+    if !root.exists() || !root.is_dir() {
+        return IngressScanResult {
+            links: vec![],
+            ingress_files_scanned: vec![],
+            errors: vec![format!("Path does not exist: {}", folder_path)],
+        };
+    }
+
+    // 1. Collect all Ingress docs
+    let mut ingresses: Vec<FileIngressInfo> = Vec::new();
+    scan_dir_for_ingresses(root, &mut ingresses, &mut errors);
+
+    // 2. Build service + workload name → file path indexes
+    let (svc_index, workload_index) = build_service_index(root);
+
+    // 3. Build links
+    let mut links: Vec<IngressRouteLink> = Vec::new();
+    let mut ingress_files_scanned: Vec<String> = Vec::new();
+
+    for ingress in &ingresses {
+        if !ingress_files_scanned.contains(&ingress.file_path) {
+            ingress_files_scanned.push(ingress.file_path.clone());
+        }
+
+        for path_entry in &ingress.paths {
+            let target_svc = &path_entry.backend.service_name;
+            let target_ns = &ingress.ingress_namespace; // services are in same namespace by default
+
+            let service_file_path = svc_index.get(target_svc).cloned();
+            let workload_file_path = workload_index.get(target_svc).cloned();
+
+            links.push(IngressRouteLink {
+                ingress_name: ingress.ingress_name.clone(),
+                ingress_namespace: ingress.ingress_namespace.clone(),
+                ingress_file_path: ingress.file_path.clone(),
+                ingress_class_name: ingress.ingress_class_name.clone(),
+                host: path_entry.host.clone(),
+                path: path_entry.path.clone(),
+                path_type: path_entry.path_type.clone(),
+                target_service: target_svc.clone(),
+                target_namespace: target_ns.clone(),
+                target_port_number: path_entry.backend.port_number,
+                target_port_name: path_entry.backend.port_name.clone(),
+                service_file_exists: service_file_path.is_some(),
+                service_file_path,
+                workload_file_exists: workload_file_path.is_some(),
+                workload_file_path,
+            });
+        }
+    }
+
+    IngressScanResult { links, ingress_files_scanned, errors }
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -3185,6 +3981,14 @@ fn main() {
             // Layout
             save_endfield_layout,
             load_endfield_layout,
+            // Cluster target / kubeconfig
+            list_kubeconfig_contexts,
+            get_current_kubeconfig_context,
+            test_cluster_connection,
+            save_project_config,
+            load_project_config,
+            get_default_kubeconfig_path,
+            set_active_cluster_target,
             // Deploy Image
             deploy_image,
             // File watcher
@@ -3198,6 +4002,7 @@ fn main() {
             discover_ingress_routes,
             list_services_in_namespace,
             list_namespaces,
+            scan_ingress_routes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

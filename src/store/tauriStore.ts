@@ -916,3 +916,94 @@ export async function watchProject(projectPath: string): Promise<void> {
 export async function unwatchProject(): Promise<void> {
   return safeInvoke("unwatch_project");
 }
+
+// ─── Cluster Target / Kubeconfig ─────────────────────────────────────────────
+
+export interface KubeconfigContext {
+  name: string;
+  cluster: string;
+  namespace?: string | null;
+}
+
+export interface ClusterTarget {
+  id: string;
+  name: string;
+  type: "kubernetes";
+  kubeconfigPath?: string | null;
+  contextName: string;
+  namespace?: string | null;
+  isDefault: boolean;
+  lastConnectionStatus?: string | null;
+  lastUsedAt?: string | null;
+}
+
+export interface ProjectConfig {
+  version: number;
+  project_path: string;
+  clusterTarget?: ClusterTarget | null;
+  fields: FieldLayoutEntry[];
+}
+
+export async function listKubeconfigContexts(
+  kubeconfigPath?: string | null,
+): Promise<KubeconfigContext[]> {
+  return safeInvoke<KubeconfigContext[]>("list_kubeconfig_contexts", {
+    kubeconfigPath: kubeconfigPath ?? null,
+  });
+}
+
+export async function getCurrentKubeconfigContext(
+  kubeconfigPath?: string | null,
+): Promise<string> {
+  return safeInvoke<string>("get_current_kubeconfig_context", {
+    kubeconfigPath: kubeconfigPath ?? null,
+  });
+}
+
+export async function testClusterConnection(
+  contextName: string,
+  kubeconfigPath?: string | null,
+): Promise<string> {
+  return safeInvoke<string>("test_cluster_connection", {
+    kubeconfigPath: kubeconfigPath ?? null,
+    contextName,
+  });
+}
+
+export async function saveProjectConfig(
+  projectPath: string,
+  clusterTarget: ClusterTarget | null,
+  fields: FieldLayoutEntry[],
+): Promise<void> {
+  return safeInvoke("save_project_config", {
+    projectPath,
+    clusterTarget,
+    fields,
+  });
+}
+
+export async function loadProjectConfig(
+  projectPath: string,
+): Promise<ProjectConfig | null> {
+  try {
+    return await safeInvoke<ProjectConfig>("load_project_config", {
+      projectPath,
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function getDefaultKubeconfigPath(): Promise<string> {
+  return safeInvoke<string>("get_default_kubeconfig_path");
+}
+
+export async function setActiveClusterTarget(
+  contextName: string | null,
+  kubeconfigPath?: string | null,
+): Promise<void> {
+  return safeInvoke("set_active_cluster_target", {
+    kubeconfigPath: kubeconfigPath ?? null,
+    contextName,
+  });
+}

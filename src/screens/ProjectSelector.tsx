@@ -1,7 +1,12 @@
 import { AppIcon, AppIconName } from "../ui/AppIcon";
 import React, { useState, useEffect } from "react";
 import { useIDEStore } from "../store/ideStore";
-import { openFolderDialog, scanYamlFiles } from "../store/tauriStore";
+import {
+  openFolderDialog,
+  scanYamlFiles,
+  ClusterTarget,
+} from "../store/tauriStore";
+import { ClusterSelector } from "../components/ClusterSelector";
 
 const RECENT_KEY = "endfield_recent_paths";
 function getRecent(): string[] {
@@ -125,13 +130,18 @@ export function ProjectSelector() {
   const [recent, setRecent] = useState<string[]>([]);
   const [mounted, setMounted] = useState(false);
 
+  // Two-step flow: "folder" → "cluster"
+  const [step, setStep] = useState<"folder" | "cluster">("folder");
+  const [pendingPath, setPendingPath] = useState<string | null>(null);
+
   useEffect(() => {
     setRecent(getRecent());
     const t = setTimeout(() => setMounted(true), 40);
     return () => clearTimeout(t);
   }, []);
 
-  const open = async (path?: string) => {
+  // Step 1: pick folder, then advance to cluster selection
+  const pickFolder = async (path?: string) => {
     setError(null);
     setLoading(true);
     try {
@@ -140,15 +150,37 @@ export function ProjectSelector() {
         setLoading(false);
         return;
       }
-      const result = await scanYamlFiles(folderPath);
-      addRecent(folderPath);
-      await setProject(result);
-      refreshClusterStatus();
+      setPendingPath(folderPath);
+      setStep("cluster");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
+  };
+
+  // Step 2: cluster selected → open project
+  const openWithCluster = async (clusterTarget: ClusterTarget | null) => {
+    if (!pendingPath) return;
+    setError(null);
+    setLoading(true);
+    try {
+      const result = await scanYamlFiles(pendingPath);
+      addRecent(pendingPath);
+      await setProject(result, clusterTarget);
+      refreshClusterStatus();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setStep("folder");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const goBack = () => {
+    setStep("folder");
+    setPendingPath(null);
+    setError(null);
   };
 
   return (
@@ -249,198 +281,50 @@ export function ProjectSelector() {
           <FeatureItem icon="diff" label="Cluster diff & logs" />
         </div>
 
-        <div
-          style={{
-            color: "var(--text-faint)",
-            fontSize: 10,
-            fontFamily: "var(--font-mono)",
-            opacity: 0.5,
-          }}
-        >
-          v0.1.0-alpha
+        {/* Step indicator */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <StepIndicator
+            step={1}
+            label="Select Project"
+            active={step === "folder"}
+            done={step === "cluster"}
+          />
+          <StepIndicator
+            step={2}
+            label="Select Cluster"
+            active={step === "cluster"}
+            done={false}
+          />
+
+          <div
+            style={{
+              color: "var(--text-faint)",
+              fontSize: 10,
+              fontFamily: "var(--font-mono)",
+              opacity: 0.5,
+              marginTop: 12,
+            }}
+          >
+            v0.1.0-alpha
+          </div>
         </div>
       </div>
 
       {/* ── Right panel ── */}
-      <div
-        style={{
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-          padding: "52px 56px",
-          overflowY: "auto",
-          background: "var(--bg-primary)",
-        }}
-      >
-        <div
-          style={{
-            color: "var(--text-primary)",
-            fontSize: "var(--font-size-2xl)",
-            fontWeight: 600,
-            letterSpacing: "-0.02em",
-            marginBottom: 6,
-          }}
-        >
-          Start
-        </div>
-        <div
-          style={{
-            color: "var(--text-subtle)",
-            fontSize: "var(--font-size-md)",
-            marginBottom: 36,
-          }}
-        >
-          Open a folder with Kubernetes configs to begin
-        </div>
-
-        {/* Open button */}
-        <button
-          onClick={() => open()}
-          disabled={loading}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            padding: "13px 20px",
-            background: loading
-              ? "rgba(203, 166, 247, 0.1)"
-              : "rgba(203, 166, 247, 0.08)",
-            border: "1px solid var(--border-accent)",
-            borderRadius: "var(--radius-xl)",
-            cursor: loading ? "wait" : "pointer",
-            marginBottom: 28,
-            maxWidth: 420,
-            transition: "var(--ease-std)",
-          }}
-          onMouseEnter={(e) => {
-            if (!loading)
-              (e.currentTarget as HTMLElement).style.background =
-                "rgba(203, 166, 247, 0.15)";
-          }}
-          onMouseLeave={(e) => {
-            (e.currentTarget as HTMLElement).style.background =
-              "rgba(203, 166, 247, 0.08)";
-          }}
-        >
-          <div
-            style={{
-              width: 32,
-              height: 32,
-              borderRadius: "var(--radius-md)",
-              background: "rgba(203, 166, 247, 0.15)",
-              border: "1px solid rgba(203, 166, 247, 0.25)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 16,
-              flexShrink: 0,
-            }}
-          >
-            {loading ? (
-              <span
-                style={{
-                  animation: "ef-pulse-dot 0.8s ease-in-out infinite",
-                  display: "inline-block",
-                }}
-              >
-                ···
-              </span>
-            ) : (
-              <AppIcon
-                name="folderOpen"
-                size={18}
-                strokeWidth={1.5}
-                style={{ color: "var(--accent-alt)" }}
-              />
-            )}
-          </div>
-          <div style={{ textAlign: "left" }}>
-            <div
-              style={{
-                color: "var(--accent-alt)",
-                fontSize: "var(--font-size-md)",
-                fontWeight: 500,
-              }}
-            >
-              {loading ? "Opening…" : "Open Folder"}
-            </div>
-            <div
-              style={{
-                color: "var(--text-faint)",
-                fontSize: "var(--font-size-xs)",
-                marginTop: 1,
-              }}
-            >
-              Select a project directory
-            </div>
-          </div>
-        </button>
-
-        {/* Error */}
-        {error && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "flex-start",
-              gap: 8,
-              padding: "10px 14px",
-              background: "rgba(243, 139, 168, 0.08)",
-              border: "1px solid rgba(243, 139, 168, 0.2)",
-              borderRadius: "var(--radius-md)",
-              marginBottom: 24,
-              maxWidth: 420,
-            }}
-          >
-            <AppIcon
-              name="warning"
-              size={13}
-              strokeWidth={2}
-              style={{ color: "var(--accent-red)", flexShrink: 0 }}
-            />
-            <span
-              style={{
-                color: "var(--accent-red)",
-                fontSize: "var(--font-size-sm)",
-                lineHeight: 1.5,
-              }}
-            >
-              {error}
-            </span>
-          </div>
-        )}
-
-        {/* Recent */}
-        {recent.length > 0 && (
-          <div style={{ maxWidth: 520 }}>
-            <div
-              style={{
-                color: "var(--text-subtle)",
-                fontSize: "var(--font-size-xs)",
-                letterSpacing: "0.08em",
-                textTransform: "uppercase",
-                fontWeight: 500,
-                marginBottom: 12,
-              }}
-            >
-              Recent
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {recent.map((p) => {
-                const parts = p.split("/").filter(Boolean);
-                const name = parts[parts.length - 1];
-                const dir = "/" + parts.slice(0, -1).join("/");
-                return (
-                  <RecentItem
-                    key={p}
-                    name={name}
-                    path={dir}
-                    onClick={() => open(p)}
-                    disabled={loading}
-                  />
-                );
-              })}
-            </div>
-          </div>
+      <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
+        {step === "folder" ? (
+          <FolderStep
+            loading={loading}
+            error={error}
+            recent={recent}
+            onOpen={pickFolder}
+          />
+        ) : (
+          <ClusterSelector
+            projectPath={pendingPath!}
+            onConfirm={openWithCluster}
+            onBack={goBack}
+          />
         )}
       </div>
     </div>
@@ -518,5 +402,287 @@ function RecentItem({
         </span>
       )}
     </button>
+  );
+}
+
+// ─── FolderStep ───────────────────────────────────────────────────────────────
+
+function FolderStep({
+  loading,
+  error,
+  recent,
+  onOpen,
+}: {
+  loading: boolean;
+  error: string | null;
+  recent: string[];
+  onOpen: (path?: string) => void;
+}) {
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        padding: "52px 56px",
+        overflowY: "auto",
+        background: "var(--bg-primary)",
+        height: "100%",
+      }}
+    >
+      <div
+        style={{
+          color: "var(--text-primary)",
+          fontSize: "var(--font-size-2xl)",
+          fontWeight: 600,
+          letterSpacing: "-0.02em",
+          marginBottom: 6,
+        }}
+      >
+        Start
+      </div>
+      <div
+        style={{
+          color: "var(--text-subtle)",
+          fontSize: "var(--font-size-md)",
+          marginBottom: 36,
+        }}
+      >
+        Open a folder with Kubernetes configs to begin
+      </div>
+
+      {/* Open button */}
+      <button
+        onClick={() => onOpen()}
+        disabled={loading}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          padding: "13px 20px",
+          background: loading
+            ? "rgba(203, 166, 247, 0.1)"
+            : "rgba(203, 166, 247, 0.08)",
+          border: "1px solid var(--border-accent)",
+          borderRadius: "var(--radius-xl)",
+          cursor: loading ? "wait" : "pointer",
+          marginBottom: 28,
+          maxWidth: 420,
+          transition: "var(--ease-std)",
+        }}
+        onMouseEnter={(e) => {
+          if (!loading)
+            (e.currentTarget as HTMLElement).style.background =
+              "rgba(203, 166, 247, 0.15)";
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLElement).style.background =
+            "rgba(203, 166, 247, 0.08)";
+        }}
+      >
+        <div
+          style={{
+            width: 32,
+            height: 32,
+            borderRadius: "var(--radius-md)",
+            background: "rgba(203, 166, 247, 0.15)",
+            border: "1px solid rgba(203, 166, 247, 0.25)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 16,
+            flexShrink: 0,
+          }}
+        >
+          {loading ? (
+            <span
+              style={{
+                animation: "ef-pulse-dot 0.8s ease-in-out infinite",
+                display: "inline-block",
+              }}
+            >
+              ···
+            </span>
+          ) : (
+            <AppIcon
+              name="folderOpen"
+              size={18}
+              strokeWidth={1.5}
+              style={{ color: "var(--accent-alt)" }}
+            />
+          )}
+        </div>
+        <div style={{ textAlign: "left" }}>
+          <div
+            style={{
+              color: "var(--accent-alt)",
+              fontSize: "var(--font-size-md)",
+              fontWeight: 500,
+            }}
+          >
+            {loading ? "Opening…" : "Open Folder"}
+          </div>
+          <div
+            style={{
+              color: "var(--text-faint)",
+              fontSize: "var(--font-size-xs)",
+              marginTop: 1,
+            }}
+          >
+            Select a project directory
+          </div>
+        </div>
+      </button>
+
+      {/* Error */}
+      {error && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 8,
+            padding: "10px 14px",
+            background: "rgba(243, 139, 168, 0.08)",
+            border: "1px solid rgba(243, 139, 168, 0.2)",
+            borderRadius: "var(--radius-md)",
+            marginBottom: 24,
+            maxWidth: 420,
+          }}
+        >
+          <AppIcon
+            name="warning"
+            size={13}
+            strokeWidth={2}
+            style={{ color: "var(--accent-red)", flexShrink: 0 }}
+          />
+          <span
+            style={{
+              color: "var(--accent-red)",
+              fontSize: "var(--font-size-sm)",
+              lineHeight: 1.5,
+            }}
+          >
+            {error}
+          </span>
+        </div>
+      )}
+
+      {/* Recent */}
+      {recent.length > 0 && (
+        <div style={{ maxWidth: 520 }}>
+          <div
+            style={{
+              color: "var(--text-subtle)",
+              fontSize: "var(--font-size-xs)",
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              fontWeight: 500,
+              marginBottom: 12,
+            }}
+          >
+            Recent
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {recent.map((p) => {
+              const parts = p.split("/").filter(Boolean);
+              const name = parts[parts.length - 1];
+              const dir = "/" + parts.slice(0, -1).join("/");
+              return (
+                <RecentItem
+                  key={p}
+                  name={name}
+                  path={dir}
+                  onClick={() => onOpen(p)}
+                  disabled={loading}
+                />
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── StepIndicator ────────────────────────────────────────────────────────────
+
+function StepIndicator({
+  step,
+  label,
+  active,
+  done,
+}: {
+  step: number;
+  label: string;
+  active: boolean;
+  done: boolean;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        opacity: active ? 1 : done ? 0.7 : 0.35,
+        transition: "var(--ease-std)",
+      }}
+    >
+      <div
+        style={{
+          width: 20,
+          height: 20,
+          borderRadius: "50%",
+          background: active
+            ? "rgba(203,166,247,0.2)"
+            : done
+              ? "rgba(166,227,161,0.15)"
+              : "var(--bg-elevated)",
+          border: `1px solid ${
+            active
+              ? "var(--border-accent)"
+              : done
+                ? "rgba(166,227,161,0.3)"
+                : "var(--border-subtle)"
+          }`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+        }}
+      >
+        {done ? (
+          <AppIcon
+            name="check"
+            size={10}
+            strokeWidth={2.5}
+            style={{ color: "var(--accent-green, #a6e3a1)" }}
+          />
+        ) : (
+          <span
+            style={{
+              color: active ? "var(--accent)" : "var(--text-faint)",
+              fontSize: 9,
+              fontWeight: 600,
+              fontFamily: "var(--font-mono)",
+            }}
+          >
+            {step}
+          </span>
+        )}
+      </div>
+      <span
+        style={{
+          color: active
+            ? "var(--text-secondary)"
+            : done
+              ? "var(--text-faint)"
+              : "var(--text-faint)",
+          fontSize: "var(--font-size-xs)",
+          fontWeight: active ? 500 : 400,
+        }}
+      >
+        {label}
+      </span>
+    </div>
   );
 }

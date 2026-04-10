@@ -43,8 +43,20 @@ export default function App() {
   // ── Cluster status polling ──────────────────────────────────────────────────
   useEffect(() => {
     if (!projectPath) return;
-    refreshClusterStatus();
-    const id = setInterval(refreshClusterStatus, 3_000);
+    let running = false;
+
+    const poll = async () => {
+      if (running) return; // skip if previous call still in flight
+      running = true;
+      try {
+        await refreshClusterStatus();
+      } finally {
+        running = false;
+      }
+    };
+
+    poll();
+    const id = setInterval(poll, 3_000);
     return () => clearInterval(id);
   }, [projectPath, refreshClusterStatus]);
 

@@ -28,12 +28,16 @@ import { DEFAULT_LAYOUT, GRAPH_ONLY_LAYOUT } from "../mock/defaultLayout";
 import {
   YamlNode,
   ClusterStatus,
+  ClusterTarget,
   FieldLayoutEntry,
   ScanResult,
   applyLayoutToNodes,
   loadEndfieldLayout,
   saveEndfieldLayout,
   getClusterStatus,
+  loadProjectConfig,
+  saveProjectConfig,
+  setActiveClusterTarget,
 } from "./tauriStore";
 
 // ─── Store interface ──────────────────────────────────────────────────────────
@@ -47,9 +51,14 @@ interface IDEStore {
   projectPath: string | null;
   nodes: YamlNode[];
   clusterStatus: ClusterStatus | null;
+  clusterTarget: ClusterTarget | null;
   selectedLogPod: { name: string; namespace: string } | null;
 
-  setProject: (result: ScanResult) => Promise<void>;
+  setProject: (
+    result: ScanResult,
+    clusterTarget?: ClusterTarget | null,
+  ) => Promise<void>;
+  setClusterTarget: (target: ClusterTarget | null) => Promise<void>;
   closeProject: () => void;
   updateNodePosition: (id: string, x: number, y: number) => void;
   addNode: (node: YamlNode) => void;
@@ -168,21 +177,73 @@ export const useIDEStore = create<IDEStore>()(
     projectPath: null,
     nodes: [],
     clusterStatus: null,
+    clusterTarget: null,
     selectedLogPod: null,
 
-    setProject: async (result: ScanResult) => {
-      const layout = await loadEndfieldLayout(result.project_path);
+    setProject: async (
+      result: ScanResult,
+      clusterTarget?: ClusterTarget | null,
+    ) => {
+      // Try to load project config (new format) which includes cluster target + layout
+      const projectConfig = await loadProjectConfig(result.project_path);
+      const resolvedTarget =
+        clusterTarget !== undefined
+          ? clusterTarget
+          : (projectConfig?.clusterTarget ?? null);
+
+      // Fall back to legacy .endfield file for layout only
+      const layout = projectConfig
+        ? {
+            version: projectConfig.version,
+            project_path: projectConfig.project_path,
+            fields: projectConfig.fields,
+          }
+        : await loadEndfieldLayout(result.project_path);
       const nodes = applyLayoutToNodes(result.nodes, layout);
-      // Open project with graph-only view — user opens panels via View menu
+
       set({
         projectPath: result.project_path,
         nodes,
+        clusterTarget: resolvedTarget,
         areas: GRAPH_ONLY_LAYOUT.areas,
       });
+
+      // Tell the backend which kubeconfig/context to use for all kubectl calls
+      if (resolvedTarget) {
+        setActiveClusterTarget(
+          resolvedTarget.contextName,
+          resolvedTarget.kubeconfigPath ?? null,
+        ).catch(() => {});
+      }
+    },
+
+    setClusterTarget: async (target: ClusterTarget | null) => {
+      const state = get();
+      set({ clusterTarget: target });
+      // Tell backend immediately
+      setActiveClusterTarget(
+        target?.contextName ?? null,
+        target?.kubeconfigPath ?? null,
+      ).catch(() => {});
+      // Persist to project config
+      if (state.projectPath) {
+        const fields: FieldLayoutEntry[] = state.nodes.map((n) => ({
+          id: n.id,
+          label: n.label,
+          x: n.x,
+          y: n.y,
+        }));
+        saveProjectConfig(state.projectPath, target, fields).catch(() => {});
+      }
     },
 
     closeProject: () => {
-      set({ projectPath: null, nodes: [], clusterStatus: null });
+      set({
+        projectPath: null,
+        nodes: [],
+        clusterStatus: null,
+        clusterTarget: null,
+      });
     },
 
     updateNodePosition: (id: string, x: number, y: number) => {

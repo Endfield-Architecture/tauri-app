@@ -138,6 +138,7 @@ function setSplitRatioInTree(
 }
 
 /** Get or create the primary center TabGroup */
+// @ts-ignore
 function getOrCreateCenterGroup(areas: DockArea[]): {
   areas: DockArea[];
   groupId: string;

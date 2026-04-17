@@ -210,6 +210,7 @@ interface Props {
   postgresNode: YamlNode;
   postgresConfig: PostgresConfig;
   serviceNodes: YamlNode[];
+  initialServiceId?: string;
   onClose: () => void;
   onConnect: (
     serviceNodeId: string,
@@ -223,11 +224,12 @@ interface Props {
 export function PostgresConnectionModal({
   postgresConfig,
   serviceNodes,
+  initialServiceId,
   onClose,
   onConnect,
 }: Props) {
   const [selectedServiceId, setSelectedServiceId] = useState<string>(
-    serviceNodes[0]?.id ?? "",
+    initialServiceId ?? serviceNodes[0]?.id ?? "",
   );
   const [useDatabaseUrl, setUseDatabaseUrl] = useState(true);
   const [usePgVars, setUsePgVars] = useState(false);
@@ -241,6 +243,19 @@ export function PostgresConnectionModal({
 
   const selectedService = serviceNodes.find((n) => n.id === selectedServiceId);
   const sameNs = selectedService?.namespace === postgresConfig.namespace;
+
+  useEffect(() => {
+    if (
+      initialServiceId &&
+      serviceNodes.some((node) => node.id === initialServiceId)
+    ) {
+      setSelectedServiceId(initialServiceId);
+      return;
+    }
+    if (!serviceNodes.some((node) => node.id === selectedServiceId)) {
+      setSelectedServiceId(serviceNodes[0]?.id ?? "");
+    }
+  }, [initialServiceId, selectedServiceId, serviceNodes]);
 
   useEffect(() => {
     if (!selectedService?.file_path) {

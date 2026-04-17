@@ -8,7 +8,7 @@ interface EditorPanelProps {
   groupId: string;
 }
 
-export function EditorPanel({ tab, groupId }: EditorPanelProps) {
+export function EditorPanel({ tab }: EditorPanelProps) {
   const [content, setContent] = useState("# Loading...");
   const [isDirty, setIsDirty] = useState(false);
   const [saving, setSaving] = useState(false);

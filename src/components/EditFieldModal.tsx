@@ -276,7 +276,6 @@ interface Props {
 
 export function EditFieldModal({ node, onClose }: Props) {
   const projectPath = useIDEStore((s) => s.projectPath);
-  const updateNodeFromFile = useIDEStore((s) => s.updateNodeFromFile);
 
   // Pre-populate from node
   const [image, setImage] = useState(node.image ?? "");

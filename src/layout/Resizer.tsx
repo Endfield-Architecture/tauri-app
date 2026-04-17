@@ -1,4 +1,4 @@
-import React, { useRef } from "react";
+import React from "react";
 
 interface ResizerProps {
   direction: "horizontal" | "vertical";
@@ -33,7 +33,7 @@ export function Resizer({ direction, onResize }: ResizerProps) {
       onMouseDown={handleMouseDown}
       style={{
         flexShrink: 0,
-        width:  isH ? 4 : "100%",
+        width: isH ? 4 : "100%",
         height: isH ? "100%" : 4,
         background: "transparent",
         cursor: isH ? "col-resize" : "row-resize",
@@ -41,8 +41,13 @@ export function Resizer({ direction, onResize }: ResizerProps) {
         zIndex: 20,
         transition: "background 0.15s",
       }}
-      onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "rgba(203,166,247,0.35)")}
-      onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
+      onMouseEnter={(e) =>
+        ((e.currentTarget as HTMLElement).style.background =
+          "rgba(203,166,247,0.35)")
+      }
+      onMouseLeave={(e) =>
+        ((e.currentTarget as HTMLElement).style.background = "transparent")
+      }
     />
   );
 }

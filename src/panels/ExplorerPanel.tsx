@@ -31,6 +31,7 @@ import {
   saveYamlFile,
   kubectlApply,
   helmTemplate,
+  deployResource,
   scanProjectFiles,
 } from "../store/tauriStore";
 import { genId } from "../layout/utils";
@@ -205,10 +206,6 @@ function groupByType(nodes: YamlNode[]): FieldGroup[] {
 
 function groupFlat(nodes: YamlNode[]): FieldGroup[] {
   return [{ id: "all", label: "All Fields", nodes }];
-}
-
-function isInfraType(typeId: string): boolean {
-  return ["gateway", "infra", "monitoring"].includes(typeId);
 }
 
 // ─── Flat list builder (for virtualization) ───────────────────────────────────
@@ -1524,6 +1521,16 @@ function AddFieldModal({
         }
         const dir = `${projectPath}/infra/${n}`;
         await helmTemplate(dir, n, helmPreset.ns).catch(() => {});
+        const deployResult = await deployResource(n, "helm", dir, helmPreset.ns, {
+          helmRelease: n,
+          helmRepoName: helmPreset.chart,
+          helmRepoUrl: helmPreset.repo,
+        });
+        if (!deployResult.success) {
+          throw new Error(
+            deployResult.stderr || "Helm chart was created but failed to deploy",
+          );
+        }
         onAdd({
           id: genId("node"),
           label: n,
@@ -2161,7 +2168,6 @@ export function ExplorerPanel() {
   const clusterStatus = useIDEStore((s) => s.clusterStatus);
   const addNode = useIDEStore((s) => s.addNode);
   const renameNode = useIDEStore((s) => s.renameNode);
-  const removeNode = useIDEStore((s) => s.removeNode);
   const openTab = useIDEStore((s) => s.openTab);
   const setSelected = useIDEStore((s) => s.setSelectedEntity);
   const selected = useIDEStore((s) => s.selectedEntity);
@@ -2844,7 +2850,7 @@ export function ExplorerPanel() {
                   <div style={{ height: visibleItems.start * ROW_HEIGHT }} />
                 )}
 
-                {visibleItems.items.map((item, idx) => {
+                {visibleItems.items.map((item) => {
                   if (item.kind === "group-header") {
                     return (
                       <GroupHeader

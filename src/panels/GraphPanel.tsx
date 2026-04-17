@@ -1,13 +1,17 @@
 import React, { useCallback, useRef, useState, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { useIDEStore } from "../store/ideStore";
-import { YamlNode, saveYamlFile, deleteFieldFiles } from "../store/tauriStore";
+import {
+  YamlNode,
+  saveYamlFile,
+  deleteFieldFiles,
+} from "../store/tauriStore";
 import { ContextMenu, ContextMenuState } from "../components/ContextMenu";
 import { DeleteConfirmDialog } from "../components/DeleteConfirmDialog";
 import { EditFieldModal } from "../components/EditFieldModal";
 import { AddFieldModal } from "../components/AddFieldModal";
 import { executeCommand } from "../commands/commands";
-import { AppIcon, resolveNodeIconName, resolveNodeColor } from "../ui/AppIcon";
+import { AppIcon, resolveNodeIconName } from "../ui/AppIcon";
 import {
   IngressRoute,
   discoverIngressRoutes,
@@ -389,8 +393,6 @@ export function GraphPanel() {
   const clusterStatus = useIDEStore((s) => s.clusterStatus);
   const projectPath = useIDEStore((s) => s.projectPath);
   const updateNodePosition = useIDEStore((s) => s.updateNodePosition);
-  const setSelectedEntity = useIDEStore((s) => s.setSelectedEntity);
-  const renameNode = useIDEStore((s) => s.renameNode);
   const addNode = useIDEStore((s) => s.addNode);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -427,6 +429,7 @@ export function GraphPanel() {
   >(new Map());
   const [dbConnectModal, setDbConnectModal] = useState<{
     postgresNodeId: string;
+    initialServiceId?: string;
   } | null>(null);
   const [dbEdgeCtxMenu, setDbEdgeCtxMenu] =
     useState<DbEdgeContextMenuState | null>(null);
@@ -1034,7 +1037,7 @@ export function GraphPanel() {
                 onContextMenu={(e) => handleNodeContextMenu(e, node)}
                 onRenameChange={setRenameValue}
                 onRenameCommit={commitRename}
-                renameRef={renameRef}
+                renameRef={renameRef as React.RefObject<HTMLInputElement>}
                 dbConnected={
                   node.type_id === "database"
                     ? Array.from(dbConnections.values()).some(
@@ -1107,17 +1110,18 @@ export function GraphPanel() {
           extraItems={
             contextMenu.node &&
             isServiceNode(contextMenu.node) &&
-            postgresFields.length > 0
+            postgresFields.length === 1
               ? [
                   {
                     label: "Connect to PostgreSQL…",
                     icon: "database",
                     action: () => {
                       const node = contextMenu.node!;
+                      const postgresNodeId = postgresFields[0]?.fieldId;
+                      if (!postgresNodeId) return;
                       setDbConnectModal({
-                        serviceNodeId: node.id,
-                        serviceLabel: node.label,
-                        serviceNamespace: node.namespace,
+                        postgresNodeId,
+                        initialServiceId: node.id,
                       });
                       setContextMenu(null);
                     },
@@ -1312,6 +1316,7 @@ export function GraphPanel() {
               postgresNode={pgNode}
               postgresConfig={pgConfig}
               serviceNodes={svcNodes}
+              initialServiceId={dbConnectModal.initialServiceId}
               onClose={() => setDbConnectModal(null)}
               onConnect={(serviceNodeId, postgresFieldId, envVarNames) => {
                 setDbConnections((prev) => {
@@ -1407,10 +1412,6 @@ export function GraphPanel() {
                   "PGPASSWORD",
                   "PGDATABASE",
                 ];
-                const pattern = new RegExp(
-                  `^[\\s\\S]*?(${dbEnvKeys.join("|")})[\\s\\S]*?\\n`,
-                  "gm",
-                );
                 // Line-by-line removal of env var entries
                 const lines = yaml.split("\n");
                 let skipNext = false;

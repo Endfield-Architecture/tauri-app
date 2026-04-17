@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useState } from "react";
 import { TabGroupNode, Tab, DropPosition } from "../layout/types";
 import { useIDEStore } from "../store/ideStore";
 import { PanelRenderer } from "./PanelRenderer";
@@ -16,7 +16,7 @@ interface TabGroupViewProps {
   areaSlot: string;
 }
 
-export function TabGroupView({ group, areaSlot }: TabGroupViewProps) {
+export function TabGroupView({ group }: TabGroupViewProps) {
   const [dropZoneVisible, setDropZoneVisible] = useState(false);
   const dragState = useIDEStore((s) => s.dragState);
   const dropTab = useIDEStore((s) => s.dropTab);

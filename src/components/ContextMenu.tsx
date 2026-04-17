@@ -16,6 +16,11 @@ interface ContextMenuProps {
   onRename: (node: YamlNode) => void;
   onEdit: (node: YamlNode) => void;
   onDelete: (node: YamlNode) => void;
+  extraItems?: {
+    label: string;
+    icon: string;
+    action: () => void;
+  }[];
 }
 
 export function ContextMenu({

@@ -1,4 +1,4 @@
-import { AppIcon, AppIconName } from "../ui/AppIcon";
+import { AppIcon } from "../ui/AppIcon";
 import React, { useState, useEffect } from "react";
 import { useIDEStore } from "../store/ideStore";
 import {
@@ -652,7 +652,7 @@ function StepIndicator({
       >
         {done ? (
           <AppIcon
-            name="check"
+            name="confirm"
             size={10}
             strokeWidth={2.5}
             style={{ color: "var(--accent-green, #a6e3a1)" }}

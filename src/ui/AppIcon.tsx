@@ -56,8 +56,6 @@ import {
   AlertCircle,
   Info,
   CheckCircle2,
-  Eye,
-  EyeOff,
   Edit2,
   Trash2,
   Copy,
@@ -78,10 +76,13 @@ import {
   GitMerge,
   Upload,
   Download,
+  // @ts-ignore
+  Cpu as CpuIcon,
+  // @ts-ignore
   FolderOpen as FolderOpenIcon,
+  // @ts-ignore
   Layers as LayersIcon,
   Layout,
-  Cpu as CpuIcon,
   MonitorCheck,
   type LucideIcon,
 } from "lucide-react";

@@ -1,7 +1,6 @@
 import { AppIcon } from "../ui/AppIcon";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useIDEStore } from "../store/ideStore";
-import { YamlNode } from "../store/tauriStore";
 
 const AUTO_REFRESH_MS = 5000;
 const LOGS_REFRESH_MS = 3000;

@@ -1,4 +1,4 @@
-import { AppIcon, AppIconName, resolveNodeIconName } from "../ui/AppIcon";
+import { AppIcon, AppIconName } from "../ui/AppIcon";
 import React, { useState, useRef, useEffect } from "react";
 import { useIDEStore } from "../store/ideStore";
 import {
@@ -15,10 +15,6 @@ import {
 } from "../store/tauriStore";
 import {
   generatePostgresRawManifests,
-  generatePostgresStatefulSet,
-  generatePostgresSecret,
-  generatePostgresService,
-  generatePostgresNamespace,
   type PostgresConfig,
 } from "../store/postgresStore";
 import { genId } from "../layout/utils";
@@ -363,7 +359,6 @@ function generateConfigs(
   name: string,
   preset: FieldPreset,
   namespace: string,
-  port: number,
   envVars: FieldEnvVar[],
 ): Record<string, string> {
   const files: Record<string, string> = {};
@@ -848,7 +843,7 @@ export function AddFieldModal({ onClose, namespace }: Props) {
     tab === "helm"
       ? Object.keys(generateHelmConfigs(name || selHelm, helmPreset))
       : Object.keys(
-          generateConfigs(name || selPreset, preset, namespace, port, envVars),
+          generateConfigs(name || selPreset, preset, namespace, envVars),
         );
 
   const handleCreateRaw = async () => {
@@ -1751,7 +1746,7 @@ export function AddFieldModal({ onClose, namespace }: Props) {
             setImgPullSecret={setImgPullSecret}
             imgCreateNs={imgCreateNs}
             setImgCreateNs={setImgCreateNs}
-            nameRef={nameRef}
+            nameRef={nameRef as React.RefObject<HTMLInputElement>}
             onClose={onClose}
             onSubmit={handleCreateImage}
             creating={creating}

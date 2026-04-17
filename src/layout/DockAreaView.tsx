@@ -45,48 +45,97 @@ function SplitView({ split, areaSlot }: SplitViewProps) {
   return <SplitVertical split={split} areaSlot={areaSlot} />;
 }
 
-function SplitHorizontal({ split, areaSlot }: { split: SplitNode; areaSlot: string }) {
+function SplitHorizontal({
+  split,
+  areaSlot,
+}: {
+  split: SplitNode;
+  areaSlot: string;
+}) {
   const containerRef = React.useRef<HTMLDivElement>(null);
 
   const handleResize = (delta: number) => {
     const w = containerRef.current?.clientWidth ?? 800;
     const ratioDelta = delta / w;
     const setSplitRatio = useIDEStore.getState().setSplitRatio;
-    const newRatio = Math.max(0.1, Math.min(0.9, split.splitRatio + ratioDelta));
+    const newRatio = Math.max(
+      0.1,
+      Math.min(0.9, split.splitRatio + ratioDelta),
+    );
     setSplitRatio(split.id, newRatio);
   };
 
   return (
-    <div ref={containerRef} style={{ display: "flex", width: "100%", height: "100%" }}>
+    <div
+      ref={containerRef}
+      style={{ display: "flex", width: "100%", height: "100%" }}
+    >
       <div style={{ flex: split.splitRatio, overflow: "hidden", minWidth: 80 }}>
         <LayoutNodeView node={split.first} areaSlot={areaSlot} />
       </div>
-      <SplitResizer isHorizontal splitId={split.id} currentRatio={split.splitRatio} onResize={handleResize} />
-      <div style={{ flex: 1 - split.splitRatio, overflow: "hidden", minWidth: 80 }}>
+      <SplitResizer
+        isHorizontal
+        splitId={split.id}
+        currentRatio={split.splitRatio}
+        onResize={handleResize}
+      />
+      <div
+        style={{ flex: 1 - split.splitRatio, overflow: "hidden", minWidth: 80 }}
+      >
         <LayoutNodeView node={split.second} areaSlot={areaSlot} />
       </div>
     </div>
   );
 }
 
-function SplitVertical({ split, areaSlot }: { split: SplitNode; areaSlot: string }) {
+function SplitVertical({
+  split,
+  areaSlot,
+}: {
+  split: SplitNode;
+  areaSlot: string;
+}) {
   const containerRef = React.useRef<HTMLDivElement>(null);
 
   const handleResize = (delta: number) => {
     const h = containerRef.current?.clientHeight ?? 600;
     const ratioDelta = delta / h;
     const setSplitRatio = useIDEStore.getState().setSplitRatio;
-    const newRatio = Math.max(0.1, Math.min(0.9, split.splitRatio + ratioDelta));
+    const newRatio = Math.max(
+      0.1,
+      Math.min(0.9, split.splitRatio + ratioDelta),
+    );
     setSplitRatio(split.id, newRatio);
   };
 
   return (
-    <div ref={containerRef} style={{ display: "flex", flexDirection: "column", width: "100%", height: "100%" }}>
-      <div style={{ flex: split.splitRatio, overflow: "hidden", minHeight: 60 }}>
+    <div
+      ref={containerRef}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        width: "100%",
+        height: "100%",
+      }}
+    >
+      <div
+        style={{ flex: split.splitRatio, overflow: "hidden", minHeight: 60 }}
+      >
         <LayoutNodeView node={split.first} areaSlot={areaSlot} />
       </div>
-      <SplitResizer isHorizontal={false} splitId={split.id} currentRatio={split.splitRatio} onResize={handleResize} />
-      <div style={{ flex: 1 - split.splitRatio, overflow: "hidden", minHeight: 60 }}>
+      <SplitResizer
+        isHorizontal={false}
+        splitId={split.id}
+        currentRatio={split.splitRatio}
+        onResize={handleResize}
+      />
+      <div
+        style={{
+          flex: 1 - split.splitRatio,
+          overflow: "hidden",
+          minHeight: 60,
+        }}
+      >
         <LayoutNodeView node={split.second} areaSlot={areaSlot} />
       </div>
     </div>
@@ -99,7 +148,6 @@ function SplitResizer({
   isHorizontal,
   splitId,
   currentRatio,
-  onResize,
 }: {
   isHorizontal: boolean;
   splitId: string;
@@ -107,25 +155,31 @@ function SplitResizer({
   onResize: (delta: number) => void;
 }) {
   const setSplitRatio = useIDEStore((s) => s.setSplitRatio);
-  const dragging     = React.useRef(false);
-  const startPos     = React.useRef(0);
-  const startRatio   = React.useRef(currentRatio);
-  const containerSz  = React.useRef(800);
-  const divRef       = React.useRef<HTMLDivElement>(null);
+  const dragging = React.useRef(false);
+  const startPos = React.useRef(0);
+  const startRatio = React.useRef(currentRatio);
+  const containerSz = React.useRef(800);
+  const divRef = React.useRef<HTMLDivElement>(null);
 
   const onMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
-    dragging.current  = true;
-    startPos.current  = isHorizontal ? e.clientX : e.clientY;
+    dragging.current = true;
+    startPos.current = isHorizontal ? e.clientX : e.clientY;
     startRatio.current = currentRatio;
 
     const parent = divRef.current?.parentElement;
-    if (parent) containerSz.current = isHorizontal ? parent.clientWidth : parent.clientHeight;
+    if (parent)
+      containerSz.current = isHorizontal
+        ? parent.clientWidth
+        : parent.clientHeight;
 
     const onMove = (e: MouseEvent) => {
       if (!dragging.current) return;
       const delta = (isHorizontal ? e.clientX : e.clientY) - startPos.current;
-      const newRatio = Math.max(0.1, Math.min(0.9, startRatio.current + delta / containerSz.current));
+      const newRatio = Math.max(
+        0.1,
+        Math.min(0.9, startRatio.current + delta / containerSz.current),
+      );
       setSplitRatio(splitId, newRatio);
     };
 
@@ -147,7 +201,7 @@ function SplitResizer({
       onMouseDown={onMouseDown}
       style={{
         flexShrink: 0,
-        width:  isHorizontal ? 4 : "100%",
+        width: isHorizontal ? 4 : "100%",
         height: isHorizontal ? "100%" : 4,
         background: "transparent",
         cursor: isHorizontal ? "col-resize" : "row-resize",
@@ -155,8 +209,13 @@ function SplitResizer({
         zIndex: 10,
         transition: "background 0.15s",
       }}
-      onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "rgba(203,166,247,0.35)")}
-      onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
+      onMouseEnter={(e) =>
+        ((e.currentTarget as HTMLElement).style.background =
+          "rgba(203,166,247,0.35)")
+      }
+      onMouseLeave={(e) =>
+        ((e.currentTarget as HTMLElement).style.background = "transparent")
+      }
     />
   );
 }

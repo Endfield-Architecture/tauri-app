@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { useIDEStore } from "../store/ideStore";
 import { DockAreaView } from "./DockAreaView";
@@ -178,7 +178,6 @@ function ViewMenu() {
 
   const left = areas.find((a) => a.slot === "left");
   const right = areas.find((a) => a.slot === "right");
-  const bottom = areas.find((a) => a.slot === "bottom");
 
   React.useEffect(() => {
     if (!open) return;

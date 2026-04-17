@@ -252,7 +252,7 @@ export function executeCommand(id: CommandId, payload: CommandPayload) {
         node.source,
         resourceDir,
         namespace,
-        node.helm?.release_name ?? null,
+        node.helm?.release_name ?? undefined,
       )
         .then((result) => {
           console.log(

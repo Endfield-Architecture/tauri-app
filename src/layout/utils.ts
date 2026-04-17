@@ -20,7 +20,7 @@ export function genId(prefix = "id"): string {
 /** Find a TabGroupNode by id anywhere in the tree */
 export function findGroup(
   root: LayoutNode | null,
-  groupId: string
+  groupId: string,
 ): TabGroupNode | null {
   if (!root) return null;
   if (root.type === "tabgroup") return root.id === groupId ? root : null;
@@ -31,7 +31,7 @@ export function findGroup(
 export function replaceNode(
   root: LayoutNode,
   targetId: string,
-  replacement: LayoutNode
+  replacement: LayoutNode,
 ): LayoutNode {
   if (root.id === targetId) return replacement;
   if (root.type === "tabgroup") return root;
@@ -45,7 +45,7 @@ export function replaceNode(
 /** Remove a TabGroup by id. Returns null if tree becomes empty. */
 export function removeGroup(
   root: LayoutNode,
-  groupId: string
+  groupId: string,
 ): LayoutNode | null {
   if (root.type === "tabgroup") {
     return root.id === groupId ? null : root;
@@ -75,7 +75,7 @@ export function addTabToGroup(group: TabGroupNode, tab: Tab): TabGroupNode {
 
 export function removeTabFromGroup(
   group: TabGroupNode,
-  tabId: string
+  tabId: string,
 ): TabGroupNode {
   const tabs = group.tabs.filter((t) => t.id !== tabId);
   let activeTabId = group.activeTabId;
@@ -93,7 +93,7 @@ export function splitGroupNode(
   group: TabGroupNode,
   direction: SplitDirection,
   newGroupFirst: boolean,
-  newTab?: Tab
+  newTab?: Tab,
 ): SplitNode {
   const newGroup: TabGroupNode = {
     type: "tabgroup",
@@ -135,7 +135,7 @@ export function dropPositionToSplit(pos: DropPosition): {
 export function updateArea(
   areas: DockArea[],
   slot: string,
-  updater: (area: DockArea) => DockArea
+  updater: (area: DockArea) => DockArea,
 ): DockArea[] {
   return areas.map((a) => (a.slot === slot ? updater(a) : a));
 }
@@ -143,7 +143,7 @@ export function updateArea(
 /** Find which area + group contains a tab */
 export function findTabLocation(
   areas: DockArea[],
-  tabId: string
+  tabId: string,
 ): { area: DockArea; group: TabGroupNode } | null {
   for (const area of areas) {
     if (!area.root) continue;
@@ -160,7 +160,7 @@ export function findTabLocation(
 /** Find which area + group has the given groupId */
 export function findGroupLocation(
   areas: DockArea[],
-  groupId: string
+  groupId: string,
 ): { area: DockArea; group: TabGroupNode } | null {
   for (const area of areas) {
     if (!area.root) continue;

@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import { useEffect } from "react";
 import { YamlNode } from "../store/tauriStore";
 import { executeCommand } from "../commands/commands";
 import { AppIcon } from "../ui/AppIcon";

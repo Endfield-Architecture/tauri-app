@@ -911,7 +911,7 @@ export function DeployImagePanel() {
                   result.secretName && ["Secret", result.secretName],
                 ] as const
               )
-                .filter(Boolean)
+                .filter((item): item is [string, string] => Boolean(item))
                 .map(([kind, res]) => (
                   <div
                     key={kind as string}

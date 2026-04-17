@@ -190,8 +190,40 @@ fn get_kubeconfig_state() -> &'static Mutex<KubeconfigRef> {
     ACTIVE_KUBECONFIG.get_or_init(|| Mutex::new(KubeconfigRef::default()))
 }
 
+fn cli_command(binary: &str) -> Command {
+    let search_dirs = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ];
+
+    let resolved = search_dirs
+        .iter()
+        .map(|dir| Path::new(dir).join(binary))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from(binary));
+
+    let mut cmd = Command::new(&resolved);
+    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default();
+    for dir in search_dirs {
+        let candidate = PathBuf::from(dir);
+        if !paths.contains(&candidate) {
+            paths.push(candidate);
+        }
+    }
+    if let Ok(joined) = std::env::join_paths(paths) {
+        cmd.env("PATH", joined);
+    }
+    cmd
+}
+
 fn run_kubectl(args: &[&str]) -> Result<String, String> {
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = cli_command("kubectl");
     {
         let kref = get_kubeconfig_state().lock().unwrap();
         if let (Some(ref path), Some(ref ctx)) = (&kref.kubeconfig_path, &kref.context_name) {
@@ -209,7 +241,7 @@ fn run_kubectl(args: &[&str]) -> Result<String, String> {
 }
 
 fn run_kubectl_output(args: &[&str]) -> (String, String, bool) {
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = cli_command("kubectl");
     {
         let kref = get_kubeconfig_state().lock().unwrap();
         if let (Some(ref path), Some(ref ctx)) = (&kref.kubeconfig_path, &kref.context_name) {
@@ -241,7 +273,7 @@ fn run_kubectl_with_timeout(args: &[&str], timeout_secs: u64) -> Result<String, 
 }
 
 fn run_helm(args: &[&str], cwd: &Path) -> Result<String, String> {
-    let mut cmd = Command::new("helm");
+    let mut cmd = cli_command("helm");
     {
         let kref = get_kubeconfig_state().lock().unwrap();
         if let (Some(ref path), Some(ref ctx)) = (&kref.kubeconfig_path, &kref.context_name) {
@@ -259,7 +291,7 @@ fn run_helm(args: &[&str], cwd: &Path) -> Result<String, String> {
 }
 
 fn run_helm_output(args: &[&str], cwd: &Path) -> (String, String, bool) {
-    let mut cmd = Command::new("helm");
+    let mut cmd = cli_command("helm");
     {
         let kref = get_kubeconfig_state().lock().unwrap();
         if let (Some(ref path), Some(ref ctx)) = (&kref.kubeconfig_path, &kref.context_name) {
@@ -2315,7 +2347,7 @@ fn helm_uninstall(release_name: String, namespace: String) -> Result<String, Str
 
 #[tauri::command]
 fn helm_available() -> bool {
-    Command::new("helm")
+    cli_command("helm")
         .arg("version")
         .arg("--short")
         .output()
@@ -2814,7 +2846,7 @@ fn deploy_image_inner(req: DeployImageRequest) -> DeployImageResult {
 /// Apply a YAML string via kubectl apply --server-side (stdin).
 fn kubectl_apply_manifest(yaml: &str, _namespace: &str) -> Result<String, String> {
     use std::io::Write;
-    let mut cmd = Command::new("kubectl");
+    let mut cmd = cli_command("kubectl");
     {
         let kref = get_kubeconfig_state().lock().unwrap();
         if let (Some(ref path), Some(ref ctx)) = (&kref.kubeconfig_path, &kref.context_name) {
@@ -3388,7 +3420,7 @@ fn get_current_kubeconfig_context(kubeconfig_path: Option<String>) -> Result<Str
 fn test_cluster_connection(kubeconfig_path: Option<String>, context_name: String) -> Result<String, String> {
     let kubeconfig = resolve_kubeconfig(kubeconfig_path.as_deref());
 
-    let output = Command::new("kubectl")
+    let output = cli_command("kubectl")
         .arg("--kubeconfig")
         .arg(&kubeconfig)
         .arg("--context")

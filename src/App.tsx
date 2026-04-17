@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { DockLayout } from "./layout/DockLayout";
 import { useIDEStore } from "./store/ideStore";
@@ -33,9 +33,6 @@ export default function App() {
   const projectPath = useIDEStore((s) => s.projectPath);
   const refreshClusterStatus = useIDEStore((s) => s.refreshClusterStatus);
   const updateNodeFromFile = useIDEStore((s) => s.updateNodeFromFile);
-  const nodes = useIDEStore((s) => s.nodes);
-  const removeNode = useIDEStore((s) => s.removeNode);
-  const closeTab = useIDEStore((s) => s.closeTab);
 
   // Keep a ref to the unlisten fn so we can clean it up
   const unlistenRef = useRef<UnlistenFn | null>(null);

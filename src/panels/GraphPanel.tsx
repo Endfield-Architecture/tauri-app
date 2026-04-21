@@ -125,6 +125,134 @@ function getType(typeId: string) {
   return NODE_TYPES[typeId] ?? NODE_TYPES.custom;
 }
 
+const GRAPH_NODE_WIDTH = 158;
+const GRAPH_NODE_HEIGHT = 88;
+
+type RectSide = "left" | "right" | "top" | "bottom";
+
+type GraphRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+type RectAnchor = {
+  x: number;
+  y: number;
+  side: RectSide;
+};
+
+function screenToWorldPoint(
+  clientX: number,
+  clientY: number,
+  rect: DOMRect,
+  pan: { x: number; y: number },
+  zoom: number,
+) {
+  return {
+    x: (clientX - rect.left - pan.x) / zoom,
+    y: (clientY - rect.top - pan.y) / zoom,
+  };
+}
+
+function getRectCenter(rect: GraphRect) {
+  return {
+    x: rect.x + rect.width / 2,
+    y: rect.y + rect.height / 2,
+  };
+}
+
+function getRectAnchor(rect: GraphRect, target: { x: number; y: number }): RectAnchor {
+  const center = getRectCenter(rect);
+  const dx = target.x - center.x;
+  const dy = target.y - center.y;
+
+  if (dx === 0 && dy === 0) {
+    return { x: rect.x + rect.width, y: center.y, side: "right" };
+  }
+
+  const scale = Math.max(
+    Math.abs(dx) / (rect.width / 2),
+    Math.abs(dy) / (rect.height / 2),
+    1,
+  );
+  const x = center.x + dx / scale;
+  const y = center.y + dy / scale;
+
+  const distances: Array<[RectSide, number]> = [
+    ["left", Math.abs(x - rect.x)],
+    ["right", Math.abs(x - (rect.x + rect.width))],
+    ["top", Math.abs(y - rect.y)],
+    ["bottom", Math.abs(y - (rect.y + rect.height))],
+  ];
+  distances.sort((a, b) => a[1] - b[1]);
+
+  return { x, y, side: distances[0][0] };
+}
+
+function getSideNormal(side: RectSide) {
+  switch (side) {
+    case "left":
+      return { x: -1, y: 0 };
+    case "right":
+      return { x: 1, y: 0 };
+    case "top":
+      return { x: 0, y: -1 };
+    case "bottom":
+      return { x: 0, y: 1 };
+  }
+}
+
+function cubicBezierPoint(
+  p0: { x: number; y: number },
+  p1: { x: number; y: number },
+  p2: { x: number; y: number },
+  p3: { x: number; y: number },
+  t: number,
+) {
+  const mt = 1 - t;
+  const mt2 = mt * mt;
+  const t2 = t * t;
+  return {
+    x:
+      mt2 * mt * p0.x +
+      3 * mt2 * t * p1.x +
+      3 * mt * t2 * p2.x +
+      t2 * t * p3.x,
+    y:
+      mt2 * mt * p0.y +
+      3 * mt2 * t * p1.y +
+      3 * mt * t2 * p2.y +
+      t2 * t * p3.y,
+  };
+}
+
+function getEdgeGeometry(fromRect: GraphRect, toRect: GraphRect, zoom: number) {
+  const toCenter = getRectCenter(toRect);
+  const fromCenter = getRectCenter(fromRect);
+  const start = getRectAnchor(fromRect, toCenter);
+  const end = getRectAnchor(toRect, fromCenter);
+  const distance = Math.hypot(end.x - start.x, end.y - start.y);
+  const handle = Math.min(Math.max(distance * 0.35, 28 * zoom), 90 * zoom);
+  const startNormal = getSideNormal(start.side);
+  const endNormal = getSideNormal(end.side);
+  const c1 = {
+    x: start.x + startNormal.x * handle,
+    y: start.y + startNormal.y * handle,
+  };
+  const c2 = {
+    x: end.x + endNormal.x * handle,
+    y: end.y + endNormal.y * handle,
+  };
+  const mid = cubicBezierPoint(start, c1, c2, end, 0.5);
+
+  return {
+    path: `M${start.x},${start.y} C${c1.x},${c1.y} ${c2.x},${c2.y} ${end.x},${end.y}`,
+    mid,
+  };
+}
+
 function StatusDot({ status }: { status: string }) {
   const colors: Record<string, string> = {
     green: "var(--status-ok)",
@@ -590,24 +718,31 @@ export function GraphPanel() {
   const handleNodeMouseDown = useCallback(
     (e: React.MouseEvent, nodeId: string) => {
       if (e.button !== 0) return;
+      e.preventDefault();
       e.stopPropagation();
       if (renamingId === nodeId) return;
       const r = canvasRef.current!.getBoundingClientRect();
       const node = storeNodes.find((n) => n.id === nodeId);
       if (!node) return;
       const pos = localPos[nodeId] ?? { x: node.x, y: node.y };
+      const pointer = screenToWorldPoint(e.clientX, e.clientY, r, pan, zoom);
       draggingNode.current = {
         id: nodeId,
-        offX: (e.clientX - r.left - pan.x) / zoom - pos.x,
-        offY: (e.clientY - r.top - pan.y) / zoom - pos.y,
+        offX: pointer.x - pos.x,
+        offY: pointer.y - pos.y,
       };
       let lastPos = pos;
       const onMove = (me: MouseEvent) => {
         if (!draggingNode.current) return;
-        const nx =
-          (me.clientX - r.left - pan.x - draggingNode.current.offX) / zoom;
-        const ny =
-          (me.clientY - r.top - pan.y - draggingNode.current.offY) / zoom;
+        const nextPointer = screenToWorldPoint(
+          me.clientX,
+          me.clientY,
+          r,
+          pan,
+          zoom,
+        );
+        const nx = nextPointer.x - draggingNode.current.offX;
+        const ny = nextPointer.y - draggingNode.current.offY;
         lastPos = { x: nx, y: ny };
         setLocalPos((prev) => ({ ...prev, [nodeId]: lastPos }));
       };
@@ -852,56 +987,56 @@ export function GraphPanel() {
             );
           }
 
-          if (!srcNode || !tgtNode) return null;
+	          if (!srcNode || !tgtNode) return null;
 
-          const srcPos = localPos[srcNode.id] ?? { x: srcNode.x, y: srcNode.y };
-          const tgtPos = localPos[tgtNode.id] ?? { x: tgtNode.x, y: tgtNode.y };
+	          const srcPos = localPos[srcNode.id] ?? { x: srcNode.x, y: srcNode.y };
+	          const tgtPos = localPos[tgtNode.id] ?? { x: tgtNode.x, y: tgtNode.y };
+	          const srcRect = {
+	            x: pan.x + srcPos.x * zoom,
+	            y: pan.y + srcPos.y * zoom,
+	            width: GRAPH_NODE_WIDTH * zoom,
+	            height: GRAPH_NODE_HEIGHT * zoom,
+	          };
+	          const tgtRect = {
+	            x: pan.x + tgtPos.x * zoom,
+	            y: pan.y + tgtPos.y * zoom,
+	            width: GRAPH_NODE_WIDTH * zoom,
+	            height: GRAPH_NODE_HEIGHT * zoom,
+	          };
+	          const { path, mid } = getEdgeGeometry(srcRect, tgtRect, zoom);
 
-          const nodeW = 158,
-            nodeH = 88;
+	          const label = routeEdgeLabel(route);
 
-          const x1 = pan.x + (srcPos.x + nodeW) * zoom;
-          const y1 = pan.y + (srcPos.y + nodeH / 2) * zoom;
-          const x2 = pan.x + tgtPos.x * zoom;
-          const y2 = pan.y + (tgtPos.y + nodeH / 2) * zoom;
-
-          const cx1 = x1 + 60 * zoom;
-          const cx2 = x2 - 60 * zoom;
-
-          const label = routeEdgeLabel(route);
-          const midX = (x1 + x2) / 2;
-          const midY = (y1 + y2) / 2 - 12 * zoom;
-
-          return (
-            <g
+	          return (
+	            <g
               key={route.route_id}
               style={{ pointerEvents: "all", cursor: "pointer" }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setEdgeCtxMenu({ route, x: e.clientX, y: e.clientY });
               }}
-            >
-              <path
-                d={`M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}`}
-                fill="none"
-                stroke="transparent"
-                strokeWidth={14}
-              />
-              <path
-                d={`M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}`}
-                fill="none"
-                stroke="#89b4fa"
-                strokeWidth={1.5}
+	            >
+	              <path
+	                d={path}
+	                fill="none"
+	                stroke="transparent"
+	                strokeWidth={14}
+	              />
+	              <path
+	                d={path}
+	                fill="none"
+	                stroke="#89b4fa"
+	                strokeWidth={1.5}
                 strokeOpacity={0.55}
                 strokeDasharray="6,4"
                 markerEnd="url(#ingress-arrow)"
-              />
-              <text
-                x={midX}
-                y={midY}
-                textAnchor="middle"
-                fill="#89b4fa"
-                fontSize={10 * zoom}
+	              />
+	              <text
+	                x={mid.x}
+	                y={mid.y - 12 * zoom}
+	                textAnchor="middle"
+	                fill="#89b4fa"
+	                fontSize={10 * zoom}
                 fontFamily="var(--font-mono)"
                 opacity={0.75}
                 style={{ userSelect: "none" }}
@@ -947,22 +1082,23 @@ export function GraphPanel() {
               x: svcNode.x,
               y: svcNode.y,
             };
-            const pgPos = localPos[pgNode.id] ?? { x: pgNode.x, y: pgNode.y };
+	            const pgPos = localPos[pgNode.id] ?? { x: pgNode.x, y: pgNode.y };
+	            const svcRect = {
+	              x: pan.x + svcPos.x * zoom,
+	              y: pan.y + svcPos.y * zoom,
+	              width: GRAPH_NODE_WIDTH * zoom,
+	              height: GRAPH_NODE_HEIGHT * zoom,
+	            };
+	            const pgRect = {
+	              x: pan.x + pgPos.x * zoom,
+	              y: pan.y + pgPos.y * zoom,
+	              width: GRAPH_NODE_WIDTH * zoom,
+	              height: GRAPH_NODE_HEIGHT * zoom,
+	            };
+	            const { path } = getEdgeGeometry(svcRect, pgRect, zoom);
 
-            const nodeW = 158,
-              nodeH = 88;
-
-            // Service right edge → Postgres left edge
-            const x1 = pan.x + (svcPos.x + nodeW) * zoom;
-            const y1 = pan.y + (svcPos.y + nodeH / 2) * zoom;
-            const x2 = pan.x + pgPos.x * zoom;
-            const y2 = pan.y + (pgPos.y + nodeH / 2) * zoom;
-
-            const cx1 = x1 + 50 * zoom;
-            const cx2 = x2 - 50 * zoom;
-
-            return (
-              <g
+	            return (
+	              <g
                 key={`db-${svcNodeId}-${fieldId}`}
                 style={{ pointerEvents: "all", cursor: "default" }}
                 onContextMenu={(e) => {
@@ -979,20 +1115,20 @@ export function GraphPanel() {
                     });
                   }
                 }}
-              >
-                {/* Wide invisible hit area for hover */}
-                <path
-                  d={`M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}`}
-                  fill="none"
-                  stroke="transparent"
-                  strokeWidth={14}
-                />
-                {/* Visible edge — sapphire blue, tighter dash */}
-                <path
-                  d={`M${x1},${y1} C${cx1},${y1} ${cx2},${y2} ${x2},${y2}`}
-                  fill="none"
-                  stroke="#74c7ec"
-                  strokeWidth={1.5}
+	              >
+	                {/* Wide invisible hit area for hover */}
+	                <path
+	                  d={path}
+	                  fill="none"
+	                  stroke="transparent"
+	                  strokeWidth={14}
+	                />
+	                {/* Visible edge — sapphire blue, tighter dash */}
+	                <path
+	                  d={path}
+	                  fill="none"
+	                  stroke="#74c7ec"
+	                  strokeWidth={1.5}
                   strokeOpacity={0.5}
                   strokeDasharray="4,3"
                   markerEnd="url(#db-arrow)"

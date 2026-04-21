@@ -6,6 +6,7 @@ import {
   generateField,
   deployResource,
   saveYamlFile,
+  readYamlFile,
   type YamlNode,
   type EnvVarPlain,
   type PortMapping,
@@ -264,6 +265,177 @@ function PortsEditor({
   );
 }
 
+function stripYamlScalar(value: string) {
+  return value.trim().replace(/^["']|["']$/g, "");
+}
+
+function parseManifestDetails(yaml: string): {
+  image: string | null;
+  plainEnv: EnvVarPlain[];
+  secretKeys: string[];
+  ports: PortMapping[];
+  imagePullSecret: string;
+  replicas: number | null;
+} {
+  const plainEnv: EnvVarPlain[] = [];
+  const secretKeys: string[] = [];
+  const ports: PortMapping[] = [];
+
+  const imageMatch = yaml.match(/^\s*image:\s*(.+)$/m);
+  const replicasMatch = yaml.match(/^\s*replicas:\s*(\d+)\s*$/m);
+  let imagePullSecret = "";
+
+  let section: "env" | "ports" | "imagePullSecrets" | null = null;
+  let sectionIndent = -1;
+  let currentEnv: { key: string; value: string; secret: boolean } | null = null;
+  let inSecretKeyRef = false;
+  let currentPort: PortMapping | null = null;
+
+  const flushEnv = () => {
+    if (!currentEnv?.key.trim()) return;
+    if (currentEnv.secret) {
+      secretKeys.push(currentEnv.key);
+    } else {
+      plainEnv.push({ key: currentEnv.key, value: currentEnv.value });
+    }
+    currentEnv = null;
+    inSecretKeyRef = false;
+  };
+
+  const flushPort = () => {
+    if (!currentPort || currentPort.containerPort <= 0) return;
+    ports.push(currentPort);
+    currentPort = null;
+  };
+
+  for (const line of yaml.split("\n")) {
+    const trimmed = line.trim();
+    const indent = line.length - line.trimStart().length;
+    if (!trimmed) continue;
+
+    if (section && indent <= sectionIndent) {
+      if (section === "env") flushEnv();
+      if (section === "ports") flushPort();
+      section = null;
+      sectionIndent = -1;
+    }
+
+    if (trimmed === "env:") {
+      flushEnv();
+      section = "env";
+      sectionIndent = indent;
+      continue;
+    }
+
+    if (trimmed === "ports:") {
+      flushPort();
+      section = "ports";
+      sectionIndent = indent;
+      continue;
+    }
+
+    if (trimmed === "imagePullSecrets:") {
+      section = "imagePullSecrets";
+      sectionIndent = indent;
+      continue;
+    }
+
+    if (section === "env") {
+      const envStart = trimmed.match(/^-\s+name:\s*(.+)$/);
+      if (envStart) {
+        flushEnv();
+        currentEnv = {
+          key: stripYamlScalar(envStart[1]),
+          value: "",
+          secret: false,
+        };
+        continue;
+      }
+
+      if (!currentEnv) continue;
+      if (trimmed.startsWith("value:")) {
+        currentEnv.value = stripYamlScalar(trimmed.slice("value:".length));
+      } else if (trimmed === "secretKeyRef:") {
+        currentEnv.secret = true;
+        inSecretKeyRef = true;
+      } else if (inSecretKeyRef && trimmed.startsWith("key:")) {
+        currentEnv.secret = true;
+      }
+      continue;
+    }
+
+    if (section === "ports") {
+      const portStart =
+        trimmed.match(/^-\s+containerPort:\s*(\d+)/) ??
+        trimmed.match(/^containerPort:\s*(\d+)/);
+      if (portStart) {
+        flushPort();
+        currentPort = {
+          containerPort: parseInt(portStart[1], 10) || 0,
+        };
+        continue;
+      }
+      if (currentPort && trimmed.startsWith("name:")) {
+        currentPort.name = stripYamlScalar(trimmed.slice("name:".length));
+      }
+      continue;
+    }
+
+    if (section === "imagePullSecrets") {
+      const secretName = trimmed.match(/^-\s+name:\s*(.+)$/);
+      if (secretName) {
+        imagePullSecret = stripYamlScalar(secretName[1]);
+      }
+    }
+  }
+
+  flushEnv();
+  flushPort();
+
+  return {
+    image: imageMatch ? stripYamlScalar(imageMatch[1]) : null,
+    plainEnv,
+    secretKeys: Array.from(new Set(secretKeys)),
+    ports,
+    imagePullSecret,
+    replicas: replicasMatch ? parseInt(replicasMatch[1], 10) : null,
+  };
+}
+
+function parseSecretValues(yaml: string): Record<string, string> {
+  const values: Record<string, string> = {};
+  let inStringData = false;
+  let baseIndent = -1;
+
+  for (const line of yaml.split("\n")) {
+    const trimmed = line.trim();
+    const indent = line.length - line.trimStart().length;
+
+    if (!trimmed) continue;
+    if (trimmed === "stringData:") {
+      inStringData = true;
+      baseIndent = indent;
+      continue;
+    }
+
+    if (inStringData && indent <= baseIndent) break;
+    if (!inStringData) continue;
+
+    const idx = trimmed.indexOf(":");
+    if (idx <= 0) continue;
+    const key = trimmed.slice(0, idx).trim();
+    const value = stripYamlScalar(trimmed.slice(idx + 1));
+    values[key] = value;
+  }
+
+  return values;
+}
+
+function parseServiceType(yaml: string): "ClusterIP" | "NodePort" | "LoadBalancer" {
+  const match = yaml.match(/^\s*type:\s*(ClusterIP|NodePort|LoadBalancer)\s*$/m);
+  return (match?.[1] as "ClusterIP" | "NodePort" | "LoadBalancer") ?? "ClusterIP";
+}
+
 // ─── Parse env vars from YAML image string ────────────────────────────────────
 // node.image might be "myapp:v2" — we can't read env from it, user provides fresh
 
@@ -303,6 +475,51 @@ export function EditFieldModal({ node, onClose }: Props) {
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
   }, [onClose]);
+
+  useEffect(() => {
+    if (!node.file_path) return;
+
+    let cancelled = false;
+    const fieldDir = node.file_path.substring(0, node.file_path.lastIndexOf("/"));
+    const servicePath = `${fieldDir}/service.yaml`;
+    const secretPath = `${fieldDir}/${node.label}-secret.yaml`;
+
+    (async () => {
+      try {
+        const [workloadYaml, serviceYaml, secretYaml] = await Promise.all([
+          readYamlFile(node.file_path).catch(() => ""),
+          readYamlFile(servicePath).catch(() => ""),
+          readYamlFile(secretPath).catch(() => ""),
+        ]);
+
+        if (cancelled || !workloadYaml) return;
+
+        const details = parseManifestDetails(workloadYaml);
+        const secretValues = secretYaml ? parseSecretValues(secretYaml) : {};
+
+        if (details.image) setImage(details.image);
+        if (details.replicas != null) setReplicas(details.replicas);
+        setEnv(details.plainEnv);
+        setSecretEnv(
+          details.secretKeys.map((key) => ({
+            key,
+            value: secretValues[key] ?? "",
+          })),
+        );
+        setPorts(details.ports);
+        setImagePullSecret(details.imagePullSecret);
+        if (serviceYaml) {
+          setServiceType(parseServiceType(serviceYaml));
+        }
+      } catch {
+        /* keep current defaults */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [node.file_path, node.label]);
 
   const isImageDeploy =
     node.source === "raw" && !node.file_path?.includes("statefulset");
@@ -397,7 +614,7 @@ export function EditFieldModal({ node, onClose }: Props) {
           image: image.trim(),
           replicas,
           port: ports[0]?.containerPort ?? 8080,
-          env: env
+          env: [...env, ...secretEnv]
             .filter((e) => e.key.trim())
             .map((e) => ({ key: e.key, value: e.value })),
           project_path: projectPath,
@@ -439,6 +656,7 @@ export function EditFieldModal({ node, onClose }: Props) {
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
+      onWheelCapture={(e) => e.stopPropagation()}
       style={{
         position: "fixed",
         inset: 0,
@@ -707,8 +925,8 @@ export function EditFieldModal({ node, onClose }: Props) {
                 lineHeight: 1.5,
               }}
             >
-              Env vars are not pre-filled from existing manifests — set all
-              values you need. Empty env will remove existing vars on redeploy.
+              Values are loaded from current manifests when available. Empty
+              rows are ignored; removed rows will be removed on redeploy.
             </span>
           </div>
         </div>

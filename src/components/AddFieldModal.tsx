@@ -415,6 +415,30 @@ const LBL: React.CSSProperties = {
   fontFamily: "var(--font-ui)",
 };
 
+const SENSITIVE_ENV_HINTS = ["PASSWORD", "SECRET", "KEY", "TOKEN", "PASS"];
+
+function isSensitiveEnvKey(key: string) {
+  const normalized = key.toUpperCase();
+  return SENSITIVE_ENV_HINTS.some((hint) => normalized.includes(hint));
+}
+
+function splitEnvVars(vars: FieldEnvVar[]) {
+  return vars.reduce<{
+    plain: FieldEnvVar[];
+    secret: FieldEnvVar[];
+  }>(
+    (acc, env) => {
+      if (isSensitiveEnvKey(env.key)) {
+        acc.secret.push({ ...env });
+      } else {
+        acc.plain.push({ ...env });
+      }
+      return acc;
+    },
+    { plain: [], secret: [] },
+  );
+}
+
 // ─── Sub-components ─────────────────────────────────────────────────
 
 function PresetCard({
@@ -566,9 +590,13 @@ function FilesPreview({
 function EnvEditor({
   vars,
   onChange,
+  isSecret,
+  addLabel,
 }: {
   vars: FieldEnvVar[];
   onChange: (v: FieldEnvVar[]) => void;
+  isSecret?: boolean;
+  addLabel?: string;
 }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -586,7 +614,13 @@ function EnvEditor({
               flex: "0 0 44%",
               fontSize: "var(--font-size-xs)",
               padding: "4px 8px",
+              ...(isSecret
+                ? {
+                    borderColor: "rgba(243,139,168,0.20)",
+                  }
+                : {}),
             }}
+            placeholder={isSecret ? "SECRET_KEY" : "KEY_NAME"}
           />
           <span style={{ color: "var(--border-default)", fontSize: 11 }}>
             :
@@ -603,7 +637,15 @@ function EnvEditor({
               flex: 1,
               fontSize: "var(--font-size-xs)",
               padding: "4px 8px",
+              ...(isSecret
+                ? {
+                    background: "rgba(243,139,168,0.04)",
+                    borderColor: "rgba(243,139,168,0.20)",
+                  }
+                : {}),
             }}
+            placeholder={isSecret ? "secret value" : "value"}
+            type={isSecret ? "password" : "text"}
           />
           <button
             onClick={() => onChange(vars.filter((_, j) => j !== i))}
@@ -632,9 +674,9 @@ function EnvEditor({
         onClick={() => onChange([...vars, { key: "", value: "" }])}
         style={{
           background: "none",
-          border: "1px dashed var(--border-default)",
+          border: `1px dashed ${isSecret ? "rgba(243,139,168,0.20)" : "var(--border-default)"}`,
           borderRadius: "var(--radius-xs)",
-          color: "var(--text-faint)",
+          color: isSecret ? "rgba(243,139,168,0.45)" : "var(--text-faint)",
           fontSize: "var(--font-size-xs)",
           padding: "4px 10px",
           cursor: "pointer",
@@ -645,16 +687,20 @@ function EnvEditor({
         }}
         onMouseEnter={(e) => {
           (e.currentTarget as HTMLElement).style.borderColor =
-            "var(--border-strong)";
-          (e.currentTarget as HTMLElement).style.color = "var(--text-muted)";
+            isSecret ? "rgba(243,139,168,0.35)" : "var(--border-strong)";
+          (e.currentTarget as HTMLElement).style.color = isSecret
+            ? "rgba(243,139,168,0.75)"
+            : "var(--text-muted)";
         }}
         onMouseLeave={(e) => {
           (e.currentTarget as HTMLElement).style.borderColor =
-            "var(--border-default)";
-          (e.currentTarget as HTMLElement).style.color = "var(--text-faint)";
+            isSecret ? "rgba(243,139,168,0.20)" : "var(--border-default)";
+          (e.currentTarget as HTMLElement).style.color = isSecret
+            ? "rgba(243,139,168,0.45)"
+            : "var(--text-faint)";
         }}
       >
-        + add variable
+        + {addLabel ?? (isSecret ? "secret" : "variable")}
       </button>
     </div>
   );
@@ -779,6 +825,7 @@ export function AddFieldModal({ onClose, namespace }: Props) {
   const [name, setName] = useState("");
   const [port, setPort] = useState(5432);
   const [envVars, setEnvVars] = useState<FieldEnvVar[]>([]);
+  const [secretEnvVars, setSecretEnvVars] = useState<FieldEnvVar[]>([]);
   const [creating, setCreating] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [hasHelm, setHasHelm] = useState(true);
@@ -825,10 +872,12 @@ export function AddFieldModal({ onClose, namespace }: Props) {
 
   const pickPreset = (key: string) => {
     const p = FIELD_PRESETS[key];
+    const split = splitEnvVars(p.envVars);
     setSelPreset(key);
     setName(key);
     setPort(p.defaultPort);
-    setEnvVars(p.envVars.map((e) => ({ ...e })));
+    setEnvVars(split.plain);
+    setSecretEnvVars(split.secret);
     setStep("configure");
     setTimeout(() => nameRef.current?.focus(), 60);
   };
@@ -843,7 +892,10 @@ export function AddFieldModal({ onClose, namespace }: Props) {
     tab === "helm"
       ? Object.keys(generateHelmConfigs(name || selHelm, helmPreset))
       : Object.keys(
-          generateConfigs(name || selPreset, preset, namespace, envVars),
+          generateConfigs(name || selPreset, preset, namespace, [
+            ...envVars,
+            ...secretEnvVars,
+          ]),
         );
 
   const handleCreateRaw = async () => {
@@ -854,17 +906,19 @@ export function AddFieldModal({ onClose, namespace }: Props) {
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9-]/g, "-");
+    const mergedEnvVars = [...envVars, ...secretEnvVars];
 
     // ── Postgres: use dedicated generator for proper Secret + StatefulSet ──
     if (selPreset === "postgres") {
       try {
         const pgPassword =
-          envVars.find((e) => e.key === "POSTGRES_PASSWORD")?.value ??
+          mergedEnvVars.find((e) => e.key === "POSTGRES_PASSWORD")?.value ??
           "changeme";
         const pgUser =
-          envVars.find((e) => e.key === "POSTGRES_USER")?.value ?? "postgres";
+          mergedEnvVars.find((e) => e.key === "POSTGRES_USER")?.value ??
+          "postgres";
         const pgDb =
-          envVars.find((e) => e.key === "POSTGRES_DB")?.value ?? "appdb";
+          mergedEnvVars.find((e) => e.key === "POSTGRES_DB")?.value ?? "appdb";
         const pgNamespace = "apps";
         const pgCfg: PostgresConfig = {
           fieldId: n,
@@ -940,16 +994,16 @@ export function AddFieldModal({ onClose, namespace }: Props) {
     }
     // ── end postgres special case ──────────────────────────────────────────
 
-    const fieldConfig: FieldConfig = {
-      id: n,
-      label: n,
-      namespace: "apps",
-      image: preset.image || `${n}:latest`,
-      replicas: preset.replicas,
-      port,
-      env: envVars.map((e) => ({ key: e.key, value: e.value })),
-      project_path: projectPath,
-    };
+      const fieldConfig: FieldConfig = {
+        id: n,
+        label: n,
+        namespace: "apps",
+        image: preset.image || `${n}:latest`,
+        replicas: preset.replicas,
+        port,
+        env: mergedEnvVars.map((e) => ({ key: e.key, value: e.value })),
+        project_path: projectPath,
+      };
     try {
       setResult("Generating files...");
       const genResult = await generateField(fieldConfig);
@@ -1163,6 +1217,7 @@ export function AddFieldModal({ onClose, namespace }: Props) {
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
+      onWheelCapture={(e) => e.stopPropagation()}
       style={{
         position: "fixed",
         inset: 0,
@@ -1594,12 +1649,41 @@ export function AddFieldModal({ onClose, namespace }: Props) {
                 }
               />
             </div>
-            {envVars.length > 0 && (
-              <div>
-                <label style={LBL}>Environment</label>
-                <EnvEditor vars={envVars} onChange={setEnvVars} />
+            <div>
+              <label style={LBL}>Plain Environment</label>
+              <div
+                style={{
+                  color: "var(--text-faint)",
+                  fontSize: "var(--font-size-xs)",
+                  marginBottom: 7,
+                }}
+              >
+                Stored directly in Deployment / StatefulSet
               </div>
-            )}
+              <EnvEditor
+                vars={envVars}
+                onChange={setEnvVars}
+                addLabel="plain env"
+              />
+            </div>
+            <div>
+              <label style={LBL}>Secret Environment</label>
+              <div
+                style={{
+                  color: "var(--text-faint)",
+                  fontSize: "var(--font-size-xs)",
+                  marginBottom: 7,
+                }}
+              >
+                Written to a Kubernetes Secret and injected via `secretKeyRef`
+              </div>
+              <EnvEditor
+                vars={secretEnvVars}
+                onChange={setSecretEnvVars}
+                isSecret
+                addLabel="secret env"
+              />
+            </div>
             <FilesPreview files={previewFiles} tt={tt} />
             <ActionRow
               onClose={onClose}
@@ -2090,94 +2174,12 @@ function ConfigureImage(props: ConfigureImageProps) {
             (stored in K8s Secret)
           </span>
         </label>
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {imgSecretEnv.map((e, i) => (
-            <div
-              key={i}
-              style={{ display: "flex", gap: 5, alignItems: "center" }}
-            >
-              <input
-                value={e.key}
-                onChange={(ev) =>
-                  setImgSecretEnv((prev) =>
-                    prev.map((x, j) =>
-                      j === i ? { ...x, key: ev.target.value } : x,
-                    ),
-                  )
-                }
-                placeholder="SECRET_KEY"
-                style={{
-                  ...INP,
-                  flex: "0 0 44%",
-                  fontSize: "var(--font-size-xs)",
-                  padding: "4px 8px",
-                  borderColor: "rgba(243,139,168,0.20)",
-                }}
-              />
-              <input
-                value={e.value}
-                type="password"
-                onChange={(ev) =>
-                  setImgSecretEnv((prev) =>
-                    prev.map((x, j) =>
-                      j === i ? { ...x, value: ev.target.value } : x,
-                    ),
-                  )
-                }
-                placeholder="secret value"
-                style={{
-                  ...INP,
-                  flex: 1,
-                  fontSize: "var(--font-size-xs)",
-                  padding: "4px 8px",
-                  background: "rgba(243,139,168,0.04)",
-                  borderColor: "rgba(243,139,168,0.20)",
-                }}
-              />
-              <button
-                onClick={() =>
-                  setImgSecretEnv((prev) => prev.filter((_, j) => j !== i))
-                }
-                style={{
-                  background: "none",
-                  border: "none",
-                  color: "var(--ctp-red)",
-                  cursor: "pointer",
-                  fontSize: 11,
-                  opacity: 0.6,
-                }}
-                onMouseEnter={(e) =>
-                  ((e.currentTarget as HTMLElement).style.opacity = "1")
-                }
-                onMouseLeave={(e) =>
-                  ((e.currentTarget as HTMLElement).style.opacity = "0.6")
-                }
-              >
-                <AppIcon name="close" size={10} strokeWidth={2.5} />
-              </button>
-            </div>
-          ))}
-          <button
-            onClick={() =>
-              setImgSecretEnv((prev) => [...prev, { key: "", value: "" }])
-            }
-            style={{
-              background: "none",
-              border: "1px dashed rgba(243,139,168,0.20)",
-              borderRadius: "var(--radius-xs)",
-              color: "rgba(243,139,168,0.45)",
-              fontSize: "var(--font-size-xs)",
-              padding: "4px 10px",
-              cursor: "pointer",
-              fontFamily: "var(--font-ui)",
-              textAlign: "left",
-              marginTop: 2,
-              transition: "var(--ease-fast)",
-            }}
-          >
-            + secret
-          </button>
-        </div>
+        <EnvEditor
+          vars={imgSecretEnv}
+          onChange={(v) => setImgSecretEnv(v)}
+          isSecret
+          addLabel="secret env"
+        />
       </div>
 
       {/* Pull secret */}

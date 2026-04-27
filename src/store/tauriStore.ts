@@ -84,10 +84,28 @@ export interface FieldLayoutEntry {
   label: string;
 }
 
+export interface NodeConnection {
+  id: string;
+  from_id: string;
+  to_id: string;
+  label?: string | null;
+  color?: string | null;
+  line_style?: "solid" | "dashed" | "dotted" | null;
+  connection_type?: "http" | "grpc" | "db" | "queue" | "custom" | null;
+  animated?: boolean | null;
+}
+
 export interface EndfieldLayout {
   version: number;
   project_path: string;
   fields: FieldLayoutEntry[];
+  connections: NodeConnection[];
+}
+
+export interface Viewport {
+  pan_x: number;
+  pan_y: number;
+  zoom: number;
 }
 
 // ─── New pipeline types ───────────────────────────────────────────────────────
@@ -671,8 +689,17 @@ export async function getEvents(namespace: string): Promise<string> {
 export async function saveEndfieldLayout(
   projectPath: string,
   fields: FieldLayoutEntry[],
+  connections: NodeConnection[] = [],
+  viewport?: Viewport | null,
+  clusterTarget?: ClusterTarget | null,
 ): Promise<void> {
-  await safeInvoke("save_endfield_layout", { projectPath, fields });
+  await safeInvoke("save_endfield_layout", {
+    projectPath,
+    fields,
+    connections,
+    viewport: viewport ?? null,
+    clusterTarget: clusterTarget ?? null,
+  });
 }
 
 export async function loadEndfieldLayout(
@@ -942,6 +969,8 @@ export interface ProjectConfig {
   project_path: string;
   clusterTarget?: ClusterTarget | null;
   fields: FieldLayoutEntry[];
+  connections: NodeConnection[];
+  viewport?: Viewport | null;
 }
 
 export async function listKubeconfigContexts(
@@ -974,11 +1003,15 @@ export async function saveProjectConfig(
   projectPath: string,
   clusterTarget: ClusterTarget | null,
   fields: FieldLayoutEntry[],
+  connections: NodeConnection[] = [],
+  viewport?: Viewport | null,
 ): Promise<void> {
   return safeInvoke("save_project_config", {
     projectPath,
     clusterTarget,
     fields,
+    connections,
+    viewport: viewport ?? null,
   });
 }
 

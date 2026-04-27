@@ -1170,22 +1170,65 @@ pub struct FieldLayoutEntry {
     pub label: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct NodeConnection {
+    /// Уникальный ID связи
+    pub id: String,
+    /// ID исходного узла
+    #[serde(alias = "fromId", alias = "from_id")]
+    pub from_id: String,
+    /// ID целевого узла
+    #[serde(alias = "toId", alias = "to_id")]
+    pub to_id: String,
+    /// Текст-метка на стрелке
+    pub label: Option<String>,
+    /// Цвет линии, CSS hex: "#4ade80"
+    pub color: Option<String>,
+    /// Стиль линии: "solid" | "dashed" | "dotted"
+    #[serde(alias = "lineStyle", alias = "line_style")]
+    pub line_style: Option<String>,
+    /// Тип связи: "http" | "grpc" | "db" | "queue" | "custom"
+    #[serde(alias = "connectionType", alias = "connection_type")]
+    pub connection_type: Option<String>,
+    /// Анимированная стрелка
+    pub animated: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Viewport {
+    pub pan_x: f64,
+    pub pan_y: f64,
+    pub zoom: f64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EndfieldLayout {
     pub version: u32,
     pub project_path: String,
     pub fields: Vec<FieldLayoutEntry>,
+    #[serde(default)]
+    pub connections: Vec<NodeConnection>,
+    #[serde(default)]
+    pub viewport: Option<Viewport>,
+    #[serde(default)]
+    pub cluster_target: Option<ClusterTarget>,
 }
 
 #[tauri::command]
 fn save_endfield_layout(
     project_path: String,
     fields: Vec<FieldLayoutEntry>,
+    connections: Vec<NodeConnection>,
+    viewport: Option<Viewport>,
+    cluster_target: Option<ClusterTarget>,
 ) -> Result<(), String> {
     let layout = EndfieldLayout {
         version: 1,
         project_path: project_path.clone(),
         fields,
+        connections,
+        viewport,
+        cluster_target,
     };
     let json = serde_json::to_string_pretty(&layout)
         .map_err(|e| format!("Serialize error: {}", e))?;
@@ -3291,6 +3334,10 @@ pub struct ProjectConfig {
     pub project_path: String,
     pub cluster_target: Option<ClusterTarget>,
     pub fields: Vec<FieldLayoutEntry>,
+    #[serde(default)]
+    pub connections: Vec<NodeConnection>,
+    #[serde(default)]
+    pub viewport: Option<Viewport>,
 }
 
 /// Expand leading `~` to the real home directory.
@@ -3463,12 +3510,14 @@ fn test_cluster_connection(kubeconfig_path: Option<String>, context_name: String
 
 /// Save project config (cluster target + layout) to .endfield/project.json
 #[tauri::command]
-fn save_project_config(project_path: String, cluster_target: Option<ClusterTarget>, fields: Vec<FieldLayoutEntry>) -> Result<(), String> {
+fn save_project_config(project_path: String, cluster_target: Option<ClusterTarget>, fields: Vec<FieldLayoutEntry>, connections: Vec<NodeConnection>, viewport: Option<Viewport>) -> Result<(), String> {
     let config = ProjectConfig {
         version: 1,
         project_path: project_path.clone(),
         cluster_target,
         fields,
+        connections,
+        viewport,
     };
     let dir = Path::new(&project_path).join(".endfield");
     fs::create_dir_all(&dir).map_err(|e| format!("Cannot create .endfield dir: {}", e))?;
@@ -3972,6 +4021,35 @@ fn scan_ingress_routes(folder_path: String) -> IngressScanResult {
     IngressScanResult { links, ingress_files_scanned, errors }
 }
 
+/// Save connections to .endfield/connections.json
+/// Вызывается при каждом изменении связи в графе.
+#[tauri::command]
+fn save_connections(
+    project_path: String,
+    connections: Vec<NodeConnection>,
+) -> Result<(), String> {
+    let dir = Path::new(&project_path).join(".endfield");
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Cannot create .endfield dir: {}", e))?;
+    let json = serde_json::to_string_pretty(&connections)
+        .map_err(|e| format!("Serialize error: {}", e))?;
+    fs::write(dir.join("connections.json"), json)
+        .map_err(|e| format!("Cannot write connections.json: {}", e))
+}
+
+/// Load connections from .endfield/connections.json
+/// Возвращает пустой массив если файл не существует.
+#[tauri::command]
+fn load_connections(project_path: String) -> Result<Vec<NodeConnection>, String> {
+    let path = Path::new(&project_path).join(".endfield").join("connections.json");
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("Cannot read connections.json: {}", e))?;
+    serde_json::from_str(&content).map_err(|e| format!("Parse error: {}", e))
+}
+
 // ─── Main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -4013,6 +4091,9 @@ fn main() {
             // Layout
             save_endfield_layout,
             load_endfield_layout,
+            // Connections
+            save_connections,
+            load_connections,
             // Cluster target / kubeconfig
             list_kubeconfig_contexts,
             get_current_kubeconfig_context,

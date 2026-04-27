@@ -30,13 +30,13 @@ import {
   ClusterStatus,
   ClusterTarget,
   FieldLayoutEntry,
+  NodeConnection,
+  Viewport,
   ScanResult,
   applyLayoutToNodes,
   loadEndfieldLayout,
   saveEndfieldLayout,
   getClusterStatus,
-  loadProjectConfig,
-  saveProjectConfig,
   setActiveClusterTarget,
 } from "./tauriStore";
 
@@ -50,6 +50,8 @@ interface IDEStore {
   // ── Project / nodes ───────────────────────────────────────────────────────────
   projectPath: string | null;
   nodes: YamlNode[];
+  connections: NodeConnection[];
+  viewport: Viewport | null;
   clusterStatus: ClusterStatus | null;
   clusterTarget: ClusterTarget | null;
   selectedLogPod: { name: string; namespace: string } | null;
@@ -67,6 +69,10 @@ interface IDEStore {
   refreshClusterStatus: () => Promise<void>;
   /** Parse YAML content and update the matching node's fields in the store. */
   updateNodeFromFile: (filePath: string, yamlContent: string) => void;
+  /** Called by GraphPanel when manual connections change — persists to disk. */
+  setConnections: (connections: NodeConnection[]) => void;
+  /** Called by GraphPanel on pan/zoom change — persists to disk (debounced by caller). */
+  setViewport: (viewport: Viewport) => void;
 
   // ── Tab actions ──────────────────────────────────────────────────────────────
   openTab: (tab: Tab, preferSlot?: DockSlot) => void;
@@ -177,6 +183,8 @@ export const useIDEStore = create<IDEStore>()(
     // ── Project / nodes ───────────────────────────────────────────────────────
     projectPath: null,
     nodes: [],
+    connections: [],
+    viewport: null,
     clusterStatus: null,
     clusterTarget: null,
     selectedLogPod: null,
@@ -185,31 +193,24 @@ export const useIDEStore = create<IDEStore>()(
       result: ScanResult,
       clusterTarget?: ClusterTarget | null,
     ) => {
-      // Try to load project config (new format) which includes cluster target + layout
-      const projectConfig = await loadProjectConfig(result.project_path);
+      const layout = await loadEndfieldLayout(result.project_path).catch(
+        () => null,
+      );
       const resolvedTarget =
         clusterTarget !== undefined
           ? clusterTarget
-          : (projectConfig?.clusterTarget ?? null);
-
-      // Fall back to legacy .endfield file for layout only
-      const layout = projectConfig
-        ? {
-            version: projectConfig.version,
-            project_path: projectConfig.project_path,
-            fields: projectConfig.fields,
-          }
-        : await loadEndfieldLayout(result.project_path);
+          : (layout?.clusterTarget ?? null);
       const nodes = applyLayoutToNodes(result.nodes, layout);
 
       set({
         projectPath: result.project_path,
         nodes,
+        connections: layout?.connections ?? [],
+        viewport: layout?.viewport ?? null,
         clusterTarget: resolvedTarget,
         areas: GRAPH_ONLY_LAYOUT.areas,
       });
 
-      // Tell the backend which kubeconfig/context to use for all kubectl calls
       if (resolvedTarget) {
         setActiveClusterTarget(
           resolvedTarget.contextName,
@@ -221,12 +222,10 @@ export const useIDEStore = create<IDEStore>()(
     setClusterTarget: async (target: ClusterTarget | null) => {
       const state = get();
       set({ clusterTarget: target });
-      // Tell backend immediately
       setActiveClusterTarget(
         target?.contextName ?? null,
         target?.kubeconfigPath ?? null,
       ).catch(() => {});
-      // Persist to project config
       if (state.projectPath) {
         const fields: FieldLayoutEntry[] = state.nodes.map((n) => ({
           id: n.id,
@@ -234,7 +233,13 @@ export const useIDEStore = create<IDEStore>()(
           x: n.x,
           y: n.y,
         }));
-        saveProjectConfig(state.projectPath, target, fields).catch(() => {});
+        saveEndfieldLayout(
+          state.projectPath,
+          fields,
+          state.connections,
+          state.viewport,
+          target,
+        ).catch(() => {});
       }
     },
 
@@ -242,6 +247,8 @@ export const useIDEStore = create<IDEStore>()(
       set({
         projectPath: null,
         nodes: [],
+        connections: [],
+        viewport: null,
         clusterStatus: null,
         clusterTarget: null,
       });
@@ -260,7 +267,13 @@ export const useIDEStore = create<IDEStore>()(
             x: n.x,
             y: n.y,
           }));
-          saveEndfieldLayout(state.projectPath, fields).catch(() => {});
+          saveEndfieldLayout(
+            state.projectPath,
+            fields,
+            state.connections,
+            state.viewport,
+            state.clusterTarget,
+          ).catch(() => {});
         }
         return { nodes };
       });
@@ -276,7 +289,13 @@ export const useIDEStore = create<IDEStore>()(
             x: n.x,
             y: n.y,
           }));
-          saveEndfieldLayout(state.projectPath, fields).catch(() => {});
+          saveEndfieldLayout(
+            state.projectPath,
+            fields,
+            state.connections,
+            state.viewport,
+            state.clusterTarget,
+          ).catch(() => {});
         }
         return { nodes };
       });
@@ -292,6 +311,58 @@ export const useIDEStore = create<IDEStore>()(
           n.id === id ? { ...n, label: newName } : n,
         ),
       }));
+    },
+
+    setConnections: (connections: NodeConnection[]) => {
+      set((state) => {
+        if (state.projectPath) {
+          const fields: FieldLayoutEntry[] = state.nodes.map((n) => ({
+            id: n.id,
+            label: n.label,
+            x: n.x,
+            y: n.y,
+          }));
+          saveEndfieldLayout(
+            state.projectPath,
+            fields,
+            connections,
+            state.viewport,
+            state.clusterTarget,
+          ).catch(() => {});
+        }
+        return { connections };
+      });
+    },
+
+    setViewport: (viewport: Viewport) => {
+      set((state) => {
+        if (state.projectPath) {
+          const fields: FieldLayoutEntry[] = state.nodes.map((n) => ({
+            id: n.id,
+            label: n.label,
+            x: n.x,
+            y: n.y,
+          }));
+          console.log(
+            "[setViewport] saving viewport",
+            viewport,
+            "to",
+            state.projectPath,
+          );
+          saveEndfieldLayout(
+            state.projectPath,
+            fields,
+            state.connections,
+            viewport,
+            state.clusterTarget,
+          )
+            .then(() => console.log("[setViewport] saved ok"))
+            .catch((e) => console.error("[setViewport] FAILED:", e));
+        } else {
+          console.warn("[setViewport] no projectPath, skipping save");
+        }
+        return { viewport };
+      });
     },
 
     refreshClusterStatus: async () => {

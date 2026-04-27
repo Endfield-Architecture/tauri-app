@@ -1,11 +1,7 @@
 import React, { useCallback, useRef, useState, useEffect } from "react";
 import { createPortal } from "react-dom";
 import { useIDEStore } from "../store/ideStore";
-import {
-  YamlNode,
-  saveYamlFile,
-  deleteFieldFiles,
-} from "../store/tauriStore";
+import { YamlNode, saveYamlFile, deleteFieldFiles } from "../store/tauriStore";
 import { ContextMenu, ContextMenuState } from "../components/ContextMenu";
 import { DeleteConfirmDialog } from "../components/DeleteConfirmDialog";
 import { EditFieldModal } from "../components/EditFieldModal";
@@ -36,6 +32,14 @@ import {
   postgresServiceDns,
 } from "../store/postgresStore";
 import { PostgresConnectionModal } from "./PostgresConnectionModal";
+import {
+  useConnections,
+  ConnectionsSVGLayer,
+  ConnectionEditor,
+  ConnectModeButton,
+  useConnectionShortcuts,
+  type NodeConnection,
+} from "../components/Graphconnections";
 
 // ─── Node type system — Catppuccin Mocha × macOS Tahoe ───────────
 //
@@ -163,7 +167,10 @@ function getRectCenter(rect: GraphRect) {
   };
 }
 
-function getRectAnchor(rect: GraphRect, target: { x: number; y: number }): RectAnchor {
+function getRectAnchor(
+  rect: GraphRect,
+  target: { x: number; y: number },
+): RectAnchor {
   const center = getRectCenter(rect);
   const dx = target.x - center.x;
   const dy = target.y - center.y;
@@ -216,15 +223,9 @@ function cubicBezierPoint(
   const t2 = t * t;
   return {
     x:
-      mt2 * mt * p0.x +
-      3 * mt2 * t * p1.x +
-      3 * mt * t2 * p2.x +
-      t2 * t * p3.x,
+      mt2 * mt * p0.x + 3 * mt2 * t * p1.x + 3 * mt * t2 * p2.x + t2 * t * p3.x,
     y:
-      mt2 * mt * p0.y +
-      3 * mt2 * t * p1.y +
-      3 * mt * t2 * p2.y +
-      t2 * t * p3.y,
+      mt2 * mt * p0.y + 3 * mt2 * t * p1.y + 3 * mt * t2 * p2.y + t2 * t * p3.y,
   };
 }
 
@@ -522,10 +523,36 @@ export function GraphPanel() {
   const projectPath = useIDEStore((s) => s.projectPath);
   const updateNodePosition = useIDEStore((s) => s.updateNodePosition);
   const addNode = useIDEStore((s) => s.addNode);
+  const setViewportInStore = useIDEStore((s) => s.setViewport);
+  const storedViewport = useIDEStore((s) => s.viewport);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
+
+  // Restore viewport when project opens. setProject is async so storedViewport
+  // may arrive AFTER projectPath changes — watch both independently.
+  const viewportAppliedForPath = useRef<string | null>(null);
+  useEffect(() => {
+    if (!projectPath) {
+      viewportAppliedForPath.current = null;
+      fittedRef.current = false;
+      return;
+    }
+    if (storedViewport && viewportAppliedForPath.current !== projectPath) {
+      viewportAppliedForPath.current = projectPath;
+      setPan({ x: storedViewport.pan_x, y: storedViewport.pan_y });
+      setZoom(storedViewport.zoom);
+      fittedRef.current = true; // skip fitView
+    } else if (
+      !storedViewport &&
+      viewportAppliedForPath.current !== projectPath
+    ) {
+      viewportAppliedForPath.current = projectPath;
+      fittedRef.current = false; // let fitView run
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectPath, storedViewport]);
   const [localPos, setLocalPos] = useState<
     Record<string, { x: number; y: number }>
   >({});
@@ -561,6 +588,35 @@ export function GraphPanel() {
   } | null>(null);
   const [dbEdgeCtxMenu, setDbEdgeCtxMenu] =
     useState<DbEdgeContextMenuState | null>(null);
+
+  // ── GraphConnections state ────────────────────────────────────
+  const {
+    connections,
+    drawingFrom,
+    isConnectMode,
+    setIsConnectMode,
+    startDrawing,
+    finishDrawing,
+    updateConnection,
+    deleteConnection,
+    deleteNodeConnections,
+  } = useConnections(projectPath);
+  const [selectedConnId, setSelectedConnId] = useState<string | null>(null);
+  const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+
+  // Keep ideStore in sync (in-memory only) so node/viewport saves bundle
+  // the latest connections. We do NOT trigger a disk write here — the
+  // useConnections hook already writes to connections.json via invoke directly.
+  useEffect(() => {
+    useIDEStore.setState({ connections });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connections]);
+
+  useConnectionShortcuts(isConnectMode, setIsConnectMode, drawingFrom, () =>
+    finishDrawing(null),
+  );
 
   // Load ingress routes from disk files — source of truth, no cluster needed.
   // Falls back to kubectl discover only when no project is open or files are empty.
@@ -706,6 +762,7 @@ export function GraphPanel() {
   const canvasRef = useRef<HTMLDivElement>(null);
   const fittedRef = useRef(false);
   const renameRef = useRef<HTMLInputElement>(null);
+  const viewportSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draggingNode = useRef<{
     id: string;
     offX: number;
@@ -714,10 +771,35 @@ export function GraphPanel() {
 
   const getNodePos = (n: YamlNode) => localPos[n.id] ?? { x: n.x, y: n.y };
 
+  // Build nodePositions for ConnectionsSVGLayer (screen coords)
+  const nodePositions: Record<
+    string,
+    { id: string; x: number; y: number; width: number; height: number }
+  > = Object.fromEntries(
+    storeNodes.map((n) => {
+      const pos = getNodePos(n);
+      return [
+        n.id,
+        {
+          id: n.id,
+          x: pan.x + pos.x * zoom,
+          y: pan.y + pos.y * zoom,
+          width: GRAPH_NODE_WIDTH * zoom,
+          height: GRAPH_NODE_HEIGHT * zoom,
+        },
+      ];
+    }),
+  );
+
   // ── Node drag ─────────────────────────────────────────────────
   const handleNodeMouseDown = useCallback(
     (e: React.MouseEvent, nodeId: string) => {
       if (e.button !== 0) return;
+      // In connect mode clicks are handled by onClick — don't start drag
+      if (isConnectMode) {
+        e.stopPropagation();
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
       if (renamingId === nodeId) return;
@@ -755,14 +837,33 @@ export function GraphPanel() {
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
     },
-    [storeNodes, pan, zoom, localPos, updateNodePosition, renamingId],
+    [
+      storeNodes,
+      pan,
+      zoom,
+      localPos,
+      updateNodePosition,
+      renamingId,
+      isConnectMode,
+    ],
   );
 
-  const handleNodeClick = useCallback((e: React.MouseEvent, node: YamlNode) => {
-    e.stopPropagation();
-    setSelectedId(node.id);
-    executeCommand("field.properties", { node });
-  }, []);
+  const handleNodeClick = useCallback(
+    (e: React.MouseEvent, node: YamlNode) => {
+      e.stopPropagation();
+      if (isConnectMode) {
+        if (drawingFrom === null) {
+          startDrawing(node.id);
+        } else {
+          finishDrawing(node.id);
+        }
+        return;
+      }
+      setSelectedId(node.id);
+      executeCommand("field.properties", { node });
+    },
+    [isConnectMode, drawingFrom, startDrawing, finishDrawing],
+  );
 
   const handleNodeContextMenu = useCallback(
     (e: React.MouseEvent, node: YamlNode) => {
@@ -805,6 +906,17 @@ export function GraphPanel() {
     startY: number;
     startPan: { x: number; y: number };
   } | null>(null);
+  // ── Debounced viewport persistence ───────────────────────────
+  const saveViewportDebounced = useCallback(
+    (newPan: { x: number; y: number }, newZoom: number) => {
+      if (viewportSaveTimer.current) clearTimeout(viewportSaveTimer.current);
+      viewportSaveTimer.current = setTimeout(() => {
+        setViewportInStore({ pan_x: newPan.x, pan_y: newPan.y, zoom: newZoom });
+      }, 600);
+    },
+    [setViewportInStore],
+  );
+
   const handleCanvasMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement;
@@ -819,10 +931,12 @@ export function GraphPanel() {
     };
     const onMove = (me: MouseEvent) => {
       if (!panState.current) return;
-      setPan({
+      const newPan = {
         x: panState.current.startPan.x + me.clientX - panState.current.startX,
         y: panState.current.startPan.y + me.clientY - panState.current.startY,
-      });
+      };
+      setPan(newPan);
+      saveViewportDebounced(newPan, zoom);
     };
     const onUp = () => {
       panState.current = null;
@@ -835,7 +949,14 @@ export function GraphPanel() {
 
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
-    setZoom((z) => Math.max(0.25, Math.min(3, z * (e.deltaY < 0 ? 1.1 : 0.9))));
+    setZoom((z) => {
+      const newZoom = Math.max(
+        0.25,
+        Math.min(3, z * (e.deltaY < 0 ? 1.1 : 0.9)),
+      );
+      saveViewportDebounced(pan, newZoom);
+      return newZoom;
+    });
   };
 
   // ── Fit view ──────────────────────────────────────────────────
@@ -854,12 +975,14 @@ export function GraphPanel() {
         rect.height / (maxY - minY + 80),
         1.5,
       ) * 0.85;
-    setPan({
+    const newPan = {
       x: rect.width / 2 - ((minX + maxX) / 2) * newZoom,
       y: rect.height / 2 - ((minY + maxY) / 2) * newZoom,
-    });
+    };
+    setPan(newPan);
     setZoom(newZoom);
-  }, [storeNodes, localPos]);
+    saveViewportDebounced(newPan, newZoom);
+  }, [storeNodes, localPos, saveViewportDebounced]);
 
   useEffect(() => {
     if (storeNodes.length > 0 && !fittedRef.current) {
@@ -898,6 +1021,16 @@ export function GraphPanel() {
         background: "var(--bg-primary)",
       }}
       onWheel={handleWheel}
+      onMouseMove={(e) => {
+        if (!drawingFrom) return;
+        const rect = (
+          e.currentTarget as HTMLDivElement
+        ).getBoundingClientRect();
+        setMousePos({
+          x: e.clientX - rect.left,
+          y: e.clientY - rect.top,
+        });
+      }}
     >
       {/* Canvas background — subtle dot grid */}
       <div
@@ -987,56 +1120,56 @@ export function GraphPanel() {
             );
           }
 
-	          if (!srcNode || !tgtNode) return null;
+          if (!srcNode || !tgtNode) return null;
 
-	          const srcPos = localPos[srcNode.id] ?? { x: srcNode.x, y: srcNode.y };
-	          const tgtPos = localPos[tgtNode.id] ?? { x: tgtNode.x, y: tgtNode.y };
-	          const srcRect = {
-	            x: pan.x + srcPos.x * zoom,
-	            y: pan.y + srcPos.y * zoom,
-	            width: GRAPH_NODE_WIDTH * zoom,
-	            height: GRAPH_NODE_HEIGHT * zoom,
-	          };
-	          const tgtRect = {
-	            x: pan.x + tgtPos.x * zoom,
-	            y: pan.y + tgtPos.y * zoom,
-	            width: GRAPH_NODE_WIDTH * zoom,
-	            height: GRAPH_NODE_HEIGHT * zoom,
-	          };
-	          const { path, mid } = getEdgeGeometry(srcRect, tgtRect, zoom);
+          const srcPos = localPos[srcNode.id] ?? { x: srcNode.x, y: srcNode.y };
+          const tgtPos = localPos[tgtNode.id] ?? { x: tgtNode.x, y: tgtNode.y };
+          const srcRect = {
+            x: pan.x + srcPos.x * zoom,
+            y: pan.y + srcPos.y * zoom,
+            width: GRAPH_NODE_WIDTH * zoom,
+            height: GRAPH_NODE_HEIGHT * zoom,
+          };
+          const tgtRect = {
+            x: pan.x + tgtPos.x * zoom,
+            y: pan.y + tgtPos.y * zoom,
+            width: GRAPH_NODE_WIDTH * zoom,
+            height: GRAPH_NODE_HEIGHT * zoom,
+          };
+          const { path, mid } = getEdgeGeometry(srcRect, tgtRect, zoom);
 
-	          const label = routeEdgeLabel(route);
+          const label = routeEdgeLabel(route);
 
-	          return (
-	            <g
+          return (
+            <g
               key={route.route_id}
               style={{ pointerEvents: "all", cursor: "pointer" }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 setEdgeCtxMenu({ route, x: e.clientX, y: e.clientY });
               }}
-	            >
-	              <path
-	                d={path}
-	                fill="none"
-	                stroke="transparent"
-	                strokeWidth={14}
-	              />
-	              <path
-	                d={path}
-	                fill="none"
-	                stroke="#89b4fa"
-	                strokeWidth={1.5}
+            >
+              <path
+                d={path}
+                fill="none"
+                stroke="transparent"
+                strokeWidth={14}
+              />
+              <path
+                d={path}
+                fill="none"
+                stroke="#89b4fa"
+                strokeWidth={1.5}
                 strokeOpacity={0.55}
                 strokeDasharray="6,4"
                 markerEnd="url(#ingress-arrow)"
-	              />
-	              <text
-	                x={mid.x}
-	                y={mid.y - 12 * zoom}
-	                textAnchor="middle"
-	                fill="#89b4fa"
-	                fontSize={10 * zoom}
+              />
+              <text
+                x={mid.x}
+                y={mid.y - 12 * zoom}
+                textAnchor="middle"
+                fill="#89b4fa"
+                fontSize={10 * zoom}
                 fontFamily="var(--font-mono)"
                 opacity={0.75}
                 style={{ userSelect: "none" }}
@@ -1082,23 +1215,23 @@ export function GraphPanel() {
               x: svcNode.x,
               y: svcNode.y,
             };
-	            const pgPos = localPos[pgNode.id] ?? { x: pgNode.x, y: pgNode.y };
-	            const svcRect = {
-	              x: pan.x + svcPos.x * zoom,
-	              y: pan.y + svcPos.y * zoom,
-	              width: GRAPH_NODE_WIDTH * zoom,
-	              height: GRAPH_NODE_HEIGHT * zoom,
-	            };
-	            const pgRect = {
-	              x: pan.x + pgPos.x * zoom,
-	              y: pan.y + pgPos.y * zoom,
-	              width: GRAPH_NODE_WIDTH * zoom,
-	              height: GRAPH_NODE_HEIGHT * zoom,
-	            };
-	            const { path } = getEdgeGeometry(svcRect, pgRect, zoom);
+            const pgPos = localPos[pgNode.id] ?? { x: pgNode.x, y: pgNode.y };
+            const svcRect = {
+              x: pan.x + svcPos.x * zoom,
+              y: pan.y + svcPos.y * zoom,
+              width: GRAPH_NODE_WIDTH * zoom,
+              height: GRAPH_NODE_HEIGHT * zoom,
+            };
+            const pgRect = {
+              x: pan.x + pgPos.x * zoom,
+              y: pan.y + pgPos.y * zoom,
+              width: GRAPH_NODE_WIDTH * zoom,
+              height: GRAPH_NODE_HEIGHT * zoom,
+            };
+            const { path } = getEdgeGeometry(svcRect, pgRect, zoom);
 
-	            return (
-	              <g
+            return (
+              <g
                 key={`db-${svcNodeId}-${fieldId}`}
                 style={{ pointerEvents: "all", cursor: "default" }}
                 onContextMenu={(e) => {
@@ -1115,20 +1248,20 @@ export function GraphPanel() {
                     });
                   }
                 }}
-	              >
-	                {/* Wide invisible hit area for hover */}
-	                <path
-	                  d={path}
-	                  fill="none"
-	                  stroke="transparent"
-	                  strokeWidth={14}
-	                />
-	                {/* Visible edge — sapphire blue, tighter dash */}
-	                <path
-	                  d={path}
-	                  fill="none"
-	                  stroke="#74c7ec"
-	                  strokeWidth={1.5}
+              >
+                {/* Wide invisible hit area for hover */}
+                <path
+                  d={path}
+                  fill="none"
+                  stroke="transparent"
+                  strokeWidth={14}
+                />
+                {/* Visible edge — sapphire blue, tighter dash */}
+                <path
+                  d={path}
+                  fill="none"
+                  stroke="#74c7ec"
+                  strokeWidth={1.5}
                   strokeOpacity={0.5}
                   strokeDasharray="4,3"
                   markerEnd="url(#db-arrow)"
@@ -1138,6 +1271,19 @@ export function GraphPanel() {
           },
         )}
       </svg>
+
+      {/* User-defined connections — SVG layer */}
+      <ConnectionsSVGLayer
+        connections={connections}
+        nodePositions={nodePositions}
+        drawingFrom={drawingFrom}
+        mousePos={mousePos}
+        selectedConnectionId={selectedConnId}
+        onConnectionClick={(id) =>
+          setSelectedConnId((prev) => (prev === id ? null : id))
+        }
+        scale={zoom}
+      />
 
       {/* Nodes */}
       <div
@@ -1160,6 +1306,7 @@ export function GraphPanel() {
                 pointerEvents: "all",
                 transform: `scale(${zoom})`,
                 transformOrigin: "top left",
+                cursor: isConnectMode ? "crosshair" : undefined,
               }}
             >
               <GraphNode
@@ -1214,6 +1361,11 @@ export function GraphPanel() {
             + Add Field
           </ToolbarButton>
         )}
+        <ConnectModeButton
+          active={isConnectMode}
+          drawingFrom={drawingFrom}
+          onToggle={() => setIsConnectMode((v) => !v)}
+        />
         <ToolbarButton onClick={fitView} title="Fit to view">
           <AppIcon
             name="fitView"
@@ -1365,10 +1517,37 @@ export function GraphPanel() {
           );
         })()}
 
+      {/* Connection editor panel */}
+      {selectedConnId && (
+        <ConnectionEditor
+          connection={connections.find((c) => c.id === selectedConnId) ?? null}
+          fromLabel={
+            storeNodes.find(
+              (n) =>
+                n.id ===
+                connections.find((c) => c.id === selectedConnId)?.from_id,
+            )?.label
+          }
+          toLabel={
+            storeNodes.find(
+              (n) =>
+                n.id ===
+                connections.find((c) => c.id === selectedConnId)?.to_id,
+            )?.label
+          }
+          onUpdate={updateConnection}
+          onDelete={deleteConnection}
+          onClose={() => setSelectedConnId(null)}
+        />
+      )}
+
       {deleteTarget && (
         <DeleteConfirmDialog
           node={deleteTarget}
-          onClose={() => setDeleteTarget(null)}
+          onClose={() => {
+            deleteNodeConnections(deleteTarget.id);
+            setDeleteTarget(null);
+          }}
         />
       )}
 

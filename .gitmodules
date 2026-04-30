@@ -1,0 +1,3 @@
+[submodule "src-tauri"]
+	path = src-tauri
+	url = git@github.com:Endfield-Architecture/tauri-core.git

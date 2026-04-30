@@ -100,6 +100,8 @@ export interface EndfieldLayout {
   project_path: string;
   fields: FieldLayoutEntry[];
   connections: NodeConnection[];
+  viewport?: Viewport | null; // ← добавить
+  clusterTarget?: ClusterTarget | null; // ← добавить
 }
 
 export interface Viewport {

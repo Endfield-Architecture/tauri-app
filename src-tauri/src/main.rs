@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod pty;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -4056,6 +4057,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(WatcherState(Mutex::new(None)))
+        .manage(pty::PtyManager::new())
         .invoke_handler(tauri::generate_handler![
             // Project / file IO
             open_folder_dialog,
@@ -4116,6 +4118,11 @@ fn main() {
             list_services_in_namespace,
             list_namespaces,
             scan_ingress_routes,
+            // Terminal / PTY
+            pty::pty_start,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_kill,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

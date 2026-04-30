@@ -8,7 +8,8 @@ export type TabContentType =
   | "inspector"
   | "explorer"
   | "welcome"
-  | "deployImage";
+  | "deployImage"
+  | "terminal";
 
 export interface Tab {
   id: string;

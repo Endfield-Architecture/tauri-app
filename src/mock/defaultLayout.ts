@@ -45,6 +45,12 @@ const bottomGroup: TabGroupNode = {
   id: "tg-bottom",
   tabs: [
     {
+      id: "tab-terminal",
+      title: "Terminal",
+      contentType: "terminal",
+      icon: ">_",
+    },
+    {
       id: "tab-diff",
       title: "Cluster Diff",
       contentType: "clusterDiff",
@@ -57,7 +63,7 @@ const bottomGroup: TabGroupNode = {
       icon: "clusterLogs",
     },
   ],
-  activeTabId: "tab-diff",
+  activeTabId: "tab-terminal",
 };
 
 // ─── Schema-first workspace layout ───────────────────────────────────────────

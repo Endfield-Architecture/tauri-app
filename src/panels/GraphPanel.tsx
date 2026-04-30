@@ -38,7 +38,6 @@ import {
   ConnectionEditor,
   ConnectModeButton,
   useConnectionShortcuts,
-  type NodeConnection,
 } from "../components/Graphconnections";
 
 // ─── Node type system — Catppuccin Mocha × macOS Tahoe ───────────

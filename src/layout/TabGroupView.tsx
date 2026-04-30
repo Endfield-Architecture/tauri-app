@@ -21,7 +21,6 @@ export function TabGroupView({ group }: TabGroupViewProps) {
   const dragState = useIDEStore((s) => s.dragState);
   const dropTab = useIDEStore((s) => s.dropTab);
 
-  const activeTab = group.tabs.find((t) => t.id === group.activeTabId);
   const showDrop = dragState.isDragging && dragState.sourceGroupId !== group.id;
 
   const handleDrop = (position: DropPosition) => {
@@ -45,11 +44,25 @@ export function TabGroupView({ group }: TabGroupViewProps) {
     >
       <TabBar group={group} />
       <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-        {activeTab ? (
-          <PanelRenderer tab={activeTab} groupId={group.id} />
-        ) : (
-          <EmptyPanel />
-        )}
+        {group.tabs.length === 0 && <EmptyPanel />}
+        {group.tabs.map((tab) => (
+          <div
+            key={tab.id}
+            style={{
+              position: "absolute",
+              inset: 0,
+              // Keep terminal mounted but hidden to preserve PTY sessions.
+              // Other panels are only rendered when active (saves memory).
+              display: tab.id === group.activeTabId ? "flex" : "none",
+              flexDirection: "column",
+            }}
+          >
+            {(tab.id === group.activeTabId ||
+              tab.contentType === "terminal") && (
+              <PanelRenderer tab={tab} groupId={group.id} />
+            )}
+          </div>
+        ))}
         {showDrop && dropZoneVisible && <DropZones onDrop={handleDrop} />}
       </div>
     </div>

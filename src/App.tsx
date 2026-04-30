@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import { DockLayout } from "./layout/DockLayout";
+import { IDELayout } from "./layout/IDELayout";
 import { useIDEStore } from "./store/ideStore";
 import { ProjectSelector } from "./screens/ProjectSelector";
 import {
@@ -136,7 +136,7 @@ export default function App() {
             animation: "ef-fadein 0.2s ease-out",
           }}
         >
-          <DockLayout />
+          <IDELayout />
         </div>
       )}
     </>

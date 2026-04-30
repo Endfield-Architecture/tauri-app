@@ -4,6 +4,7 @@ import { useIDEStore } from "../store/ideStore";
 import { DockAreaView } from "./DockAreaView";
 import { DragPreview } from "./DragPreview";
 import { Resizer } from "./Resizer";
+import { ActivityBar } from "../components/ActivityBar";
 
 const MIN_LEFT = 180;
 const MAX_LEFT = 500;
@@ -69,6 +70,34 @@ export function DockLayout() {
     [bottom?.size, setAreaSize],
   );
 
+  // ── Keyboard shortcut: Ctrl+` toggles terminal ──────────────────────────────
+  const setAreaVisible = useIDEStore((s) => s.setAreaVisible);
+  const openTab = useIDEStore((s) => s.openTab);
+
+  React.useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "`") {
+        e.preventDefault();
+        const bottomArea = areas.find((a) => a.slot === "bottom");
+        if (!bottomArea?.visible) {
+          openTab(
+            {
+              id: "tab-terminal",
+              title: "Terminal",
+              contentType: "terminal" as never,
+              icon: ">_",
+            },
+            "bottom",
+          );
+        }
+        setAreaVisible("bottom", !bottomArea?.visible);
+      }
+    };
+    window.addEventListener("keydown", handler, { capture: true });
+    return () =>
+      window.removeEventListener("keydown", handler, { capture: true });
+  }, [areas, setAreaVisible, openTab]);
+
   return (
     <div
       className="dock-layout"
@@ -86,6 +115,9 @@ export function DockLayout() {
       <TitleBar />
 
       <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        {/* ── Activity Bar ────────────────────────────────────────────────── */}
+        <ActivityBar />
+
         {/* Left panel */}
         {left?.visible && left.root && (
           <>
@@ -237,6 +269,12 @@ function ViewMenu() {
     { type: "divider" },
     {
       type: "action",
+      label: "Terminal",
+      shortcut: "⌃`",
+      action: () => openPanel("bottom", "terminal", "Terminal", ">_"),
+    },
+    {
+      type: "action",
       label: "Logs",
       action: () => openPanel("bottom", "clusterLogs", "Logs", "≡"),
     },
@@ -339,6 +377,7 @@ function ViewMenu() {
                 <ViewMenuItem
                   key={item.label}
                   label={item.label!}
+                  shortcut={(item as any).shortcut}
                   onClick={item.action!}
                 />
               );
@@ -353,10 +392,12 @@ function ViewMenu() {
 function ViewMenuItem({
   label,
   checked,
+  shortcut,
   onClick,
 }: {
   label: string;
   checked?: boolean;
+  shortcut?: string;
   onClick: () => void;
 }) {
   const [hov, setHov] = React.useState(false);
@@ -390,6 +431,17 @@ function ViewMenuItem({
         {checked === true ? "✓" : ""}
       </span>
       <span style={{ flex: 1 }}>{label}</span>
+      {shortcut && (
+        <span
+          style={{
+            fontSize: 10,
+            color: "var(--text-faint)",
+            fontFamily: "var(--font-mono)",
+          }}
+        >
+          {shortcut}
+        </span>
+      )}
     </div>
   );
 }
